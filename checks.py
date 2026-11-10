@@ -59,15 +59,18 @@ def crosscheck(source_text, targets):
         tv = extract_values(t['text'])
         for s in src:
             same_key = [x for x in tv if x['key'] and (x['key'] == s['key'] or s['key'] in x['key'] or x['key'] in s['key']) and x['unit'] == s['unit']]
-            if not same_key:
+            if any(abs(x['value'] - s['value']) < 1e-9 for x in same_key):
+                continue
+            # 원본끼리 같은 항목 값이 다를 수 있다(보고서 33.7억원 · 투자계획서 33.66억원). 결과가 그중 하나를 쓰면 다름이 아니라 빠진 값(참고)
+            alts = [o['value'] for o in src if o['key'] == s['key'] and o['unit'] == s['unit']]
+            if not same_key or any(abs(x['value'] - v) < 1e-9 for x in same_key for v in alts):
                 if not any(abs(x['value'] - s['value']) < 1e-9 and x['unit'] == s['unit'] for x in tv):
                     items.append({'target': t['name'], 'kind': 'missing', 'key': s['key'], 'want': s['raw'], 'got': '',
                                   'detail': f"원본의 '{s['key']} {s['raw']}'이(가) 없음"})
                 continue
-            if not any(abs(x['value'] - s['value']) < 1e-9 for x in same_key):
-                got = same_key[0]
-                items.append({'target': t['name'], 'kind': 'mismatch', 'key': s['key'], 'want': s['raw'], 'got': got['raw'],
-                              'detail': f"'{s['key']}' 원본 {s['raw']} ≠ {t['name']} {got['raw']}", 'ctx': got['ctx']})
+            got = same_key[0]
+            items.append({'target': t['name'], 'kind': 'mismatch', 'key': s['key'], 'want': s['raw'], 'got': got['raw'],
+                          'detail': f"'{s['key']}' 원본 {s['raw']} ≠ {t['name']} {got['raw']}", 'ctx': got['ctx']})
     mism = [i for i in items if i['kind'] == 'mismatch']
     return {'items': items, 'checked': len(src), 'mismatch': len(mism), 'missing': sum(1 for i in items if i['kind'] == 'missing'),
             'unknown': sum(1 for i in items if i['kind'] == 'unknown')}
@@ -369,3 +372,9 @@ def enforce_fixed(bp, fixed):
         tgt = next((s for s in secs if h and (h in s['heading'] or s['heading'] in h)), None) or secs[-1]
         tgt['items'].append({'label': '', 'text': t, 'children': []})
     return b
+
+
+if __name__ == '__main__':           # 자체검사: 원본끼리 같은 항목 값이 다르면(33.7억원 · 33.66억원) 결과가 그중 하나를 써도 다름이 아님
+    r = crosscheck('부가세 포함 33.7억원\n부가세 포함 33.66억원\n사업 기간 12개월', [{'name': 'PPT', 'text': '부가세 포함 33.66억원\n사업 기간 10개월'}])
+    assert [(i['kind'], i['want']) for i in r['items']] == [('missing', '33.7억원'), ('mismatch', '12개월')], r['items']
+    print('checks selftest OK')
