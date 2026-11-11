@@ -11,6 +11,8 @@ import engines
 OLE = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
 DRM_MARKS = (b'SCDSA', b'<## MarkAny', b'FASOO', b'DRMONE', b'MARKANY', b'Fasoo DRM', b'SoftCamp')
 HEAD_RX = re.compile(r'^\s*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+\.|\d{1,2}\.|[□■◆○●]|[가-하]\.)\s*(.{2,24})$')
+PUA = re.compile('[\ue000-\uf8ff]')                                   # 한글 서식의 기호 글꼴 문자
+HP = '{http://www.hancom.co.kr/hwpml/2011/paragraph}'                 # hwpx(OWPML) 본문 네임스페이스
 
 
 def is_drm(path, ext):
@@ -19,7 +21,7 @@ def is_drm(path, ext):
     head = open(path, 'rb').read(4096)
     if any(m in head for m in DRM_MARKS):
         return True
-    if ext in ('xlsx', 'pptx', 'docx') and not head.startswith(b'PK'):
+    if ext in ('xlsx', 'pptx', 'docx', 'hwpx') and not head.startswith(b'PK'):
         return True
     if ext == 'hwp' and not head.startswith(OLE):
         return True
@@ -137,13 +139,12 @@ def _hwp_tables(path, heads):
     return tables
 
 
-def _hwp(path):
-    raw = engines.hwp_text(path)
-    pua = re.compile('[\ue000-\uf8ff]')
-    lines = [pua.sub('', l).strip() for l in raw]
-    marked = [pua.sub('', l).strip() for l in raw if pua.match(l)]
+def _han_lines(raw):
+    """한글 문서의 줄 목록 → (본문, [], 장 제목). hwp · hwpx 공용."""
+    lines = [PUA.sub('', l).strip() for l in raw]
+    marked = [PUA.sub('', l).strip() for l in raw if PUA.match(l)]
     if marked:   # 코스콤 서식의 장 제목은 기호 글꼴 문자로 시작한다
-        return '\n'.join(lines), _hwp_tables(path, marked), marked
+        return '\n'.join(lines), [], marked
     heads = []
     for l in lines:
         m = HEAD_RX.match(l)
@@ -151,7 +152,40 @@ def _hwp(path):
             heads.append(m.group(1))
         elif len(l) <= 14 and not re.search(r'[:/()\d]', l) and l.strip():
             heads.append(l.strip())
-    return '\n'.join(lines), _hwp_tables(path, heads), heads
+    return '\n'.join(lines), [], heads
+
+
+def _hwp(path):
+    text, _, heads = _han_lines(engines.hwp_text(path))
+    return text, _hwp_tables(path, heads), heads
+
+
+def _hwpx(path):
+    """hwpx(ZIP + OWPML): Contents/sectionN.xml의 문단(hp:p)과 표(hp:tbl). 표준 라이브러리만 쓴다."""
+    try:
+        z = zipfile.ZipFile(path)
+    except zipfile.BadZipFile:
+        raise ValueError('한글(hwpx) 파일을 열지 못했습니다 — 손상됐거나 hwpx가 아닌 파일입니다') from None
+    secs = sorted((n for n in z.namelist() if re.fullmatch(r'Contents/section\d+\.xml', n)),
+                  key=lambda n: int(re.search(r'(\d+)\.xml$', n).group(1)))
+    if not secs:
+        raise ValueError('한글(hwpx) 본문을 찾지 못했습니다 — 손상됐거나 hwpx가 아닌 파일입니다')
+    raw, tables = [], []
+    for n in secs:
+        try:
+            root = ET.fromstring(z.read(n))
+        except ET.ParseError:
+            raise ValueError('한글(hwpx) 본문을 읽지 못했습니다 — 암호가 걸렸거나 손상된 파일일 수 있습니다') from None
+        # 문단 자신의 run만 읽어 중첩 표의 글이 두 번 들어가지 않게 한다(표 안 문단은 iter가 따로 돌려준다)
+        raw += [''.join(''.join(t.itertext()) for r in p.findall(HP + 'run') for t in r.findall(HP + 't'))
+                for p in root.iter(HP + 'p')]
+        for tb in root.iter(HP + 'tbl'):
+            g = [[_clean(''.join(''.join(t.itertext()) for t in tc.iter(HP + 't'))) for tc in tr.findall(HP + 'tc')]
+                 for tr in tb.findall(HP + 'tr')]
+            if len(g) > 1:
+                tables.append({'title': '표', 'cols': g[0], 'rows': g[1:]})
+    text, _, heads = _han_lines(raw)
+    return text, tables, heads
 
 
 def _csv(path):
@@ -182,7 +216,7 @@ def _html(path):
     return checks.html_text(path), [], [h for h in heads if h and h != '목차']
 
 
-READERS = {'xlsx': _xlsx, 'xlsm': _xlsx, 'pptx': _pptx, 'docx': _docx, 'pdf': _pdf, 'hwp': _hwp, 'csv': _csv, 'txt': _txt, 'md': _txt, 'html': _html, 'htm': _html}
+READERS = {'xlsx': _xlsx, 'xlsm': _xlsx, 'pptx': _pptx, 'docx': _docx, 'pdf': _pdf, 'hwp': _hwp, 'hwpx': _hwpx, 'csv': _csv, 'txt': _txt, 'md': _txt, 'html': _html, 'htm': _html}
 
 
 def read(path, name):
@@ -191,7 +225,7 @@ def read(path, name):
         return {'kind': ext, 'drm': True, 'text': '', 'tables': [], 'heads': []}
     fn = READERS.get(ext)
     if not fn:
-        raise ValueError(f'.{ext} 파일은 아직 읽을 수 없습니다 (xlsx·pptx·docx·pdf·hwp·html·csv·txt)')
+        raise ValueError(f'.{ext} 파일은 아직 읽을 수 없습니다 (xlsx·pptx·docx·pdf·hwp·hwpx·html·csv·txt)')
     text, tables, heads = fn(path)
     seen, hs = set(), []
     for h in heads:

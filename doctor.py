@@ -58,6 +58,11 @@ def main():
     import corp
     st = skills.ensure(force=True)
     say(st['mode'] == 'github', f"스킬 저장소 {skills.SLUG}", f"{st['mode']} {st['head'][:7]} {st['error'][:120]}")
+    if st['mode'] == 'github':                       # 읽기만 되는 계정이면 문서는 만들지만 스킬 등록·승인이 실패한다
+        w = skills.can_push()
+        say(True if w else None, '스킬 저장소 쓰기 권한 (스킬 등록·승인)',
+            '' if w else ('확인하지 못함(네트워크)' if w is None
+                          else f'gh 계정에 {skills.SLUG} Write 권한 없음 — 문서 만들기는 되지만 스킬 등록은 실패합니다'))
     for c in corp.status():
         try:
             corp.ensure(c['id'])

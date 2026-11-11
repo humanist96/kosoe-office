@@ -476,7 +476,7 @@ def make_web(bp, template, people, path):
 
 
 # ───────────── 검수 ─────────────
-BAD_END = re.compile(r'(습니다|입니다|합니다|됩니다|했다|한다|이다|있다|없다|된다)\.?$')
+BAD_END = re.compile(r'(니다|했다|한다|이다|있다|없다|된다)\.?$')   # 합니다 · 바랍니다 · 드립니다 … 모두(측정 SENT_END와 같은 범위)
 DATE_RX = checks.DATE_RX
 
 
@@ -506,8 +506,13 @@ def check(bp, warns=(), style=None, fixed=()):
     if st['ending'] != 'any':
         bad = BAD_END if st['ending'] == 'noun' else checks.NOUN_END
         ends = [it['text'] for it in items if bad.search(it['text'].strip())]
-        out.append({'id': 'end', 'name': checks.ENDINGS[st['ending']], 'ok': not ends,
-                    'detail': (f'{len(ends)}개 문장형' if st['ending'] == 'noun' else f'{len(ends)}개 개조식(~함·~임)') if ends else '', 'fix': bool(ends)})
+        # 대표 문서에서 잰 명사형은 측정과 같은 비율까지 서술형을 허용한다(기안문의 결재 요청 문장 한 줄 등).
+        # 코스콤 보고 문법 기본값은 그대로 0.
+        allow = int(len(items) * checks.NOUN_TOLERANCE) if st['ending'] == 'noun' and not checks.is_default_style(style) else 0
+        eg = f" — 예: 「…{ends[0].strip()[-30:]}」" if ends else ''          # 어느 문장이 걸렸는지 보이게
+        out.append({'id': 'end', 'name': checks.ENDINGS[st['ending']], 'ok': len(ends) <= allow,
+                    'detail': ((f'{len(ends)}개 문장형' if st['ending'] == 'noun' else f'{len(ends)}개 개조식(~함·~임)') + eg) if ends else '',
+                    'fix': len(ends) > allow})
     todo = [it['text'] for it in all_items if '확인 필요' in it['text'] or '반영 예정' in it['text'] or any(s in it['text'] for s in slots)]
     empty = [s['heading'] for s in bp['sections'] if not s['items'] and not s.get('table')]
     return out + [
@@ -517,7 +522,7 @@ def check(bp, warns=(), style=None, fixed=()):
     ]
 
 
-ENDS = [('했습니다', '했음'), ('하였습니다', '하였음'), ('되었습니다', '되었음'), ('합니다', '함'), ('됩니다', '됨'), ('입니다', '임'),
+ENDS = [('했습니다', '했음'), ('하였습니다', '하였음'), ('되었습니다', '되었음'), ('바랍니다', '바람'), ('드립니다', '드림'), ('합니다', '함'), ('됩니다', '됨'), ('입니다', '임'),
         ('습니다', '음'), ('한다', '함'), ('된다', '됨'), ('이다', '임'), ('있다', '있음'), ('없다', '없음'), ('했다', '했음')]
 # 서술형 문체(계약서·공문 등)로 되돌릴 때: 개조식 → 평서문 / 존댓말
 ENDS_PLAIN = [('하였음', '하였다'), ('되었음', '되었다'), ('했음', '했다'), ('있음', '있다'), ('없음', '없다'), ('함', '한다'), ('됨', '된다'), ('임', '이다')]
@@ -530,12 +535,15 @@ def autofix(bp, shorten_fn, warns=(), style=None, fixed=()):
     fixed = [str(f) for f in fixed]
     b = json.loads(json.dumps(bp))
     items = [it for it in _all_items(b) if not checks.is_fixed_item(it['text'], fixed)]
+    # 대표 문서 기준 명사형에서 허용치 안의 서술형(결재 요청 문장 등)은 검수가 통과시키므로 고치지 않는다 — check()와 같은 기준
+    noun_fix = st['ending'] == 'noun' and (checks.is_default_style(style) or sum(1 for it in items if BAD_END.search(it['text'].strip()))
+                                           > int(len(items) * checks.NOUN_TOLERANCE))
     for it in items:
         t = it['text']
         if st['date'] != 'any':
             t = DATE_RX.sub(lambda m: m.group(0) if checks.date_ok(m, st['date']) else checks.fmt_date(*checks.date_parts(m), st['date']), t)
         t = t.strip()
-        if st['ending'] == 'noun':
+        if noun_fix:
             t = t.rstrip('.')
             for a, z in ENDS:
                 if t.endswith(a):

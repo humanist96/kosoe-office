@@ -183,6 +183,9 @@ pre.code{background:#0f1b33;color:#d6e2ff;padding:14px;border-radius:10px;font:1
 .xlv-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
 .xlv{overflow:auto;max-height:70vh;padding:18px;border-radius:8px;background:#e4e6e9}
 .xlv-page{box-shadow:0 2px 14px rgba(0,0,0,.18);font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;line-height:1.25}
+/* 파일 끌어 놓기 강조 — 테마 CSS가 기본 CSS를 대신하므로 늘 실리는 이 블록에 둔다 */
+.dz-on{outline:2px dashed var(--o,#F06E1E);outline-offset:4px}
+.dz-on .drop{border-color:var(--o,#F06E1E);color:var(--o,#F06E1E)}
 /* 화면 테마 고르기 — 어느 테마에서도 보이도록 테마 CSS와 따로 둔다 */
 .theme-pick{display:inline-flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap}
 .theme-pick svg{width:14px;height:14px;flex:none}
@@ -255,7 +258,7 @@ async function api(path, opt = {}) {
   else if (opt.body !== undefined) { o.body = JSON.stringify(opt.body); o.headers['content-type'] = 'application/json'; }
   const r = await fetch(path, o);
   let d = {};
-  try { d = await r.json(); } catch (e) { d = {ok: false, error: `서버 응답 오류 (${r.status})`}; }
+  try { d = await r.json(); } catch (e) { d = {ok: false, error: `서버 응답 오류 (${r.status}) — 서버 창(로그)을 확인해 주세요`}; }
   if (r.status === 401 && path !== '/api/me') { showLogin(); throw new Error(d.error); }
   if (!d.ok && !opt.quiet) toast(d.error || '오류', true);
   if (!d.ok) throw new Error(d.error);
@@ -386,11 +389,46 @@ function selTpl(id) {
   PICK = id; document.querySelectorAll('.tpl').forEach(e => e.classList.toggle('sel', e.id === 't-' + id));
   const g = $('#go'); if (g) { g.disabled = false; const t = TPLS.find(x => x.id === id); g.textContent = `${t ? t.name : ''} 초안 만들기 →`; }
 }
-function pickFile(cb, multi) {
-  const i = document.createElement('input'); i.type = 'file'; i.multiple = !!multi;
-  i.accept = '.xlsx,.xlsm,.pptx,.docx,.pdf,.hwp,.html,.csv,.txt,.md,.pia';
-  i.onchange = async () => { for (const f of i.files) await cb(f); }; i.click();
+// ───────────── 첨부: 파일 선택 · 끌어 놓기 ─────────────
+const ACCEPT = '.xlsx,.xlsm,.pptx,.docx,.pdf,.hwp,.hwpx,.html,.htm,.csv,.txt,.md,.pia';
+async function eachFile(files, cb) {               // 한 파일이 실패해도 나머지는 올린다(실패 사유는 api()가 이미 토스트로 보여 줌)
+  for (const f of files) { try { await cb(f); } catch (e) { /* 토스트로 안내됨 */ } }
 }
+function pickFile(cb, multi) {
+  const i = document.createElement('input'); i.type = 'file'; i.multiple = !!multi; i.accept = ACCEPT;
+  i.onchange = () => eachFile([...i.files], cb); i.click();
+}
+// 끌어 놓을 수 있는 곳 — 위에서부터 먼저 맞는 것. 동작은 같은 화면의 📎 버튼과 똑같다.
+// document에 한 번만 건다: 화면을 innerHTML로 다시 그려도, 테마가 화면 함수를 덮어써도 class · id만 맞으면 동작한다.
+const DROPS = [
+  ['#sbIn', f => sbAdd(f)],                                                // ★ 스킬 만들기 — 대표 문서 카드
+  ['.ask', f => addAtt(f)],                                                // 새 문서 — 요청 칸(기본 · 테마 공통 class)
+  ['#wsChat', async f => { CATT.push(await upload(f)); renderCatt(); }],   // 작업 화면 — 채팅 첨부
+  ['#inSrc', async f => { IN.src.push(await upload(f)); vInspect(); }],    // 검수 — 원본 파일
+  ['#inTgt', async f => { IN.tgt.push(await upload(f)); vInspect(); }],    // 검수 — 대상 파일
+];
+let dzEl = null;
+const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files');
+function dzOf(t) {
+  for (const [sel, cb] of DROPS) { const el = t?.closest?.(sel); if (el) return {el, cb}; }
+  return {el: null, cb: null};
+}
+function dzMark(el) { if (dzEl === el) return; dzEl?.classList.remove('dz-on'); dzEl = el; el?.classList.add('dz-on'); }
+document.addEventListener('dragover', e => {
+  if (!hasFiles(e)) return;                        // 글자 · 링크 끌기는 건드리지 않는다
+  e.preventDefault();                              // 이게 없으면 영역 밖에 놓을 때 브라우저가 파일을 열어 화면을 떠난다
+  const {el} = dzOf(e.target);
+  e.dataTransfer.dropEffect = el ? 'copy' : 'none';   // 놓을 수 없는 곳은 🚫 커서, drop 자체가 일어나지 않는다
+  dzMark(el);
+});
+document.addEventListener('dragleave', e => { if (!e.relatedTarget) dzMark(null); });   // 창 밖으로 나감
+document.addEventListener('drop', e => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dzMark(null);
+  const files = [...e.dataTransfer.files];         // await 전에 복사 — 이벤트가 끝나면 목록이 빌 수 있다
+  const {cb} = dzOf(e.target);
+  if (cb) eachFile(files, cb);
+});
 async function upload(f) {
   const fd = new FormData(); fd.append('file', f);
   const d = await busy(`${f.name} 읽는 중…`, () => api('/api/upload', {body: fd}));
@@ -431,7 +469,7 @@ function vWs() {
     <h2 id="wsTitle">${esc(CMP.blueprint.title)}</h2></div>
     <div class="row">${CMP.doc_id ? `<button class="btn ghost" onclick="openDoc('${CMP.doc_id}')">🗂️ 문서 정보 · 공유</button>` : ''}</div></div>
   <div class="ws">
-    <div class="card panel"><div class="hd"><b>💬 채팅으로 지시</b><span class="small muted">첨부도 됩니다</span></div>
+    <div class="card panel" id="wsChat"><div class="hd"><b>💬 채팅으로 지시</b><span class="small muted">첨부도 됩니다</span></div>
       <div class="bd" id="chat"></div>
       <div class="quick">${['결론을 맨 앞에 넣어줘', '한 장으로 줄여줘', '첨부 표를 성과에 넣어줘', '향후 계획을 일정 위주로 구체화해줘'].map(q => `<button onclick="sendChat('${q}')">${q}</button>`).join('')}</div>
       <div style="padding:10px 14px 14px"><div class="files" id="catt" style="margin-bottom:6px"></div>

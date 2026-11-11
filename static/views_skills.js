@@ -89,8 +89,8 @@ async function vRegister() {
     ${SB.draft || SB.files.length ? `<button class="btn ghost" onclick="SB={files:[],request:'',scope:'me',job:null,draft:null,analysis:null,report:null,thumbs:0,req:null};vRegister()">처음부터</button>` : ''}</div>
   <div class="pipe" style="margin-bottom:14px">${['① 첨부·요청', '② 분석', '③ 상속 기반 생성', '④ 충분한 검증', '⑤ 등록(PR)'].map((x, i) => `<span class="st ${i + 1 < st ? 'done' : i + 1 === st ? 'now' : ''}">${x}</span>`).join('')}</div>
   <div class="grid2">
-   <div class="card box"><h3><span class="chip dark">1</span> 대표 문서 · 요청</h3>
-     <div class="drop" id="drop" onclick="pickFile(sbAdd,true)">초안·기존 문서 1건 이상 (부서 스킬은 3~5건 권장)<br><span class="small">hwp · pptx · docx · html · pdf · txt — DRM 문서는 자동 차단</span><br><span class="small">같은 서식의 <b>한글 문서 2건 이상</b>이면 원본을 서식으로 삼는 <b>복제형</b>으로 만듭니다</span></div>
+   <div class="card box" id="sbIn"><h3><span class="chip dark">1</span> 대표 문서 · 요청</h3>
+     <div class="drop" id="drop" onclick="pickFile(sbAdd,true)">초안·기존 문서 1건 이상 (부서 스킬은 3~5건 권장)<br><span class="small">hwp · hwpx · pptx · docx · html · pdf · txt — DRM 문서는 자동 차단 · 끌어 놓아도 됩니다</span><br><span class="small">같은 서식의 <b>한글(.hwp) 문서 2건 이상</b>이면 원본을 서식으로 삼는 <b>복제형</b>으로 만듭니다</span></div>
      <div class="row wrap" style="margin-top:8px"><button class="btn ghost sm" onclick="demoPick(us => { SB.files.push(...us); sbFiles(); }, n => n.startsWith('대표문서/'))">📂 시연 자료(대표 문서 3건)</button>
        <button class="btn ghost sm" onclick="demoPick(us => { SB.files.push(...us); sbFiles(); }, n => n.startsWith('계약서_3건/'))">📂 시연 자료(한글 계약서 3건 · 복제형)</button></div>
      <div id="sbf" style="margin-top:10px"></div>
@@ -106,9 +106,7 @@ async function vRegister() {
   <h3 style="margin:26px 0 10px;display:flex;gap:8px;align-items:center"><i class="chev"></i>내 등록·변경 요청</h3>
   ${mine.length ? mine.map(reqCard).join('') : '<div class="card empty small">아직 없습니다.</div>'}`;
   api('/api/skillgen/jobs').then(j => { const e = $('#sbJobs'); if (e) e.innerHTML = j.jobs.filter(x => x.stage !== 'submitted').map(x => `<button class="btn ghost sm" onclick="sbResume('${x.id}')">${esc(x.name || x.request || x.id)} · ${x.stage === 'evaluated' ? (x.auto_pass ? '검증 통과' : '검증 미통과') : '분석됨'} · ${esc(x.created)}</button>`).join('') || '<span class="small muted">없음</span>'; });
-  const dr = $('#drop');
-  dr.ondragover = e => { e.preventDefault(); dr.classList.add('on'); }; dr.ondragleave = () => dr.classList.remove('on');
-  dr.ondrop = async e => { e.preventDefault(); dr.classList.remove('on'); for (const f of e.dataTransfer.files) await sbAdd(f); };
+  // 끌어 놓기는 index.html의 document 위임(DROPS · #sbIn)이 맡는다 — 여기서 또 걸면 같은 파일이 두 번 올라간다
   sbFiles(); if (SB.analysis) sbAnaHtml(); if (SB.draft) sbDraftHtml(); if (SB.report) sbEvalHtml(); else if (SB.draft) sbEvalIntro();
 }
 async function sbResume(id) {
@@ -137,7 +135,7 @@ function sbAnaHtml() {
      <div class="out-f small"><b>한글 문서 ${c.docs.length}건을 줄 단위로 맞대어 바뀌는 칸 ${c.fields}개(${c.slots.length}곳)를 찾았습니다.</b><br>
        구조 ${c.lines}줄이 문서 ${c.docs.length}건에서 같고, 글 ${c.text_lines}줄 중 ${c.var_lines}줄만 문서마다 다릅니다. 고정된 글 <b>${(c.fixed_ratio * 100).toFixed(0)}%</b>(${c.fixed_chars}자) · 칸 ${c.slot_chars}자.<br>
        <span class="muted">고정된 글과 모양은 코드가 원본에서 그대로 가져옵니다. AI는 칸의 이름만 붙였습니다.</span>
-       ${c.skipped.length ? `<br><span class="muted">한글이 아닌 문서는 맞대기에서 뺐습니다: ${c.skipped.map(esc).join(', ')}</span>` : ''}</div>
+       ${c.skipped.length ? `<br><span class="muted">한글(.hwp)이 아닌 문서는 맞대기에서 뺐습니다: ${c.skipped.map(esc).join(', ')}</span>` : ''}</div>
      <div style="overflow-x:auto;margin-top:8px"><table class="list small"><tr><th>칸</th><th>앞뒤의 고정 글</th>${c.docs.map((_, i) => `<th>문서 ${i + 1}의 값</th>`).join('')}</tr>
        ${sbFields(c.slots).map(s => `<tr><td><b>${esc(s.key)}</b>${s.places > 1 ? ` <span class="chip n">${s.places}곳</span>` : ''}<br><span class="muted">${esc(s.section)}</span></td>
          <td>${esc(s.before.slice(-12))}<b style="color:var(--o)">▢</b>${esc(s.after.slice(0, 12))}</td>${s.values.map(v => `<td>${esc(v) || '<span class="muted">(빈 칸)</span>'}</td>`).join('')}</tr>`).join('')}</table></div>
@@ -225,9 +223,9 @@ function sbEvalHtml() {
     ${R.tasks.map((t, i) => `<details class="hl-doc"><summary class="small">과제 ${i + 1} · ${esc(t.doc)} · 구성 ${(t.with.struct * 100).toFixed(0)}% vs ${(t.without.struct * 100).toFixed(0)}% · ${t.mode === 'llm' ? 'AI' : '규칙'}</summary><pre class="code small">${esc(t.memo)}</pre></details>`).join('')}`}
     <div style="margin-top:10px"><b class="small">사람 확인 — 담당자 시범 작성 ${need}건</b><div class="row wrap" style="margin-top:6px">${Array.from({length: need}, (_, i) => `<button class="btn sm ${i < SB.thumbs ? '' : 'ghost'}" onclick="SB.thumbs=${i + 1};sbEvalHtml()">${i < SB.thumbs ? '👍' : '○'} 시범 ${i + 1}</button>`).join('')}</div></div></div></div>
    <div class="row wrap" style="margin-top:12px"><button class="btn ghost" onclick="sbEvaluate()">↻ 다시 검증</button>
-     <button class="btn o" ${all ? '' : 'disabled'} onclick="sbSubmit()">📮 ⑤ 등록 요청 (브랜치 · PR${SB.draft.scope === 'user' ? ' · 자동 검사 후 병합' : ' · 관리자 승인'})</button>
+     <button class="btn o" ${all && R.upload?.writable !== false ? '' : 'disabled'} onclick="sbSubmit()">📮 ⑤ 등록 요청 (브랜치 · PR${SB.draft.scope === 'user' ? ' · 자동 검사 후 병합' : ' · 관리자 승인'})</button>
      ${all ? '' : `<span class="small muted">모든 기준을 통과해야 열립니다</span>
-       <button class="btn red" ${R.can_force === false ? 'disabled' : ''} onclick="sbForce()" title="미통과 항목과 사유를 PR·스킬 파일에 남기고 등록합니다">⚠️ 미통과 항목이 있어도 등록</button>
+       <button class="btn red" ${R.can_force === false || R.upload?.writable === false ? 'disabled' : ''} onclick="sbForce()" title="미통과 항목과 사유를 PR·스킬 파일에 남기고 등록합니다">⚠️ 미통과 항목이 있어도 등록</button>
        ${R.can_force === false ? '<span class="small" style="color:var(--bad)">스킬 파일 검사 오류·보안(개인정보) 미통과는 강제 등록할 수 없습니다</span>' : ''}`}</div>
    ${sbUploadNote(R.upload)}`;
 }
@@ -252,6 +250,7 @@ function sbUploadNote(u) {
     <b>등록하면 올라가는 곳</b> <code>${esc(u.repo)}</code> ${pub ? '<span class="chip o">공개 저장소 — 누구나 볼 수 있음</span>' : u.visibility ? '<span class="chip">비공개 저장소</span>' : ''}<br>
     올라가는 것: ${u.files.map(esc).join(' · ')}<br>
     <b>올라가지 않는 것</b>: ${esc(u.not_uploaded)} — 이 PC에만 남습니다.
+    ${u.writable === false ? `<br><span style="color:var(--bad)">⛔ 이 PC의 GitHub 계정은 <code>${esc(u.repo)}</code>에 쓸 권한이 없어 등록할 수 없습니다 — 저장소 관리자에게 Write 권한을 요청하거나 .env의 KOSOE_SKILLS_REPO를 쓸 수 있는 저장소로 바꿔 주세요.</span>` : ''}
     ${u.names.length ? `<br><span style="color:var(--bad)">스킬 글에 회사 이름으로 보이는 글이 있습니다: <b>${u.names.map(esc).join(', ')}</b></span> — 실제 고객사라면 위 ③에서 <code>[고객사명]</code> 같은 칸으로 바꾼 뒤 다시 검증하세요.` : ''}
     ${u.clone ? `<br><span style="${pub ? 'color:var(--bad)' : ''}"><b>서식 파일에는 대표 문서의 고정된 글이 그대로 들어 있습니다.</b> ${pub ? '공개 저장소에는 가상 문서로 만든 서식만 올리세요. 실제 계약서·사내 양식은 사내(비공개) 저장소에서만 등록해야 합니다.' : ''}</span>`
       : pub ? '<br><span class="muted">고정 문구와 작성 규칙은 스킬의 내용이라 그대로 올라갑니다. 실제 문서의 문장이 들어 있지 않은지 ③에서 확인하세요.</span>' : ''}</div>`;
@@ -308,11 +307,11 @@ async function vInspect() {
   $('#main').innerHTML = `<div class="page-h"><div><h2>검수</h2><p>원본 자료(메모·엑셀)와 결과 파일의 <b>값을 대조</b>해 수정 누락을 찾고, 보고 문법·팩 규칙을 함께 봅니다. 사람이 고친 파일을 올려도 됩니다. 고친 뒤 다시 올리면 <b>재검사</b>합니다.</p></div></div>
   <div class="grid2"><div class="card box"><h3><span class="chip dark">1</span> 원본 자료</h3>
      <textarea class="in" rows="5" id="inTxt" placeholder="원본 메모를 붙여 넣거나 파일을 첨부하세요" oninput="IN.text=this.value">${esc(IN.text)}</textarea>
-     <div class="row wrap" style="margin-top:6px"><button class="btn ghost sm" onclick="pickFile(async f=>{IN.src.push(await upload(f));vInspect()},true)">📎 원본 파일</button><button class="btn ghost sm" onclick="demoPick(us=>{IN.src.push(...us);vInspect()}, n => n.endsWith('.txt'))">📂 시연 메모</button>${IN.src.map((f, i) => `<span class="chip">${esc(f.name)} <a href="#" onclick="IN.src.splice(${i},1);vInspect();return false">✕</a></span>`).join('')}</div>
+     <div class="row wrap" id="inSrc" style="margin-top:6px"><button class="btn ghost sm" onclick="pickFile(async f=>{IN.src.push(await upload(f));vInspect()},true)">📎 원본 파일</button><button class="btn ghost sm" onclick="demoPick(us=>{IN.src.push(...us);vInspect()}, n => n.endsWith('.txt'))">📂 시연 메모</button>${IN.src.map((f, i) => `<span class="chip">${esc(f.name)} <a href="#" onclick="IN.src.splice(${i},1);vInspect();return false">✕</a></span>`).join('')}</div>
      <label class="small" style="margin-top:10px;display:block">또는 내 문서(원본 자료 + 최신 결과 파일을 함께 검사)</label>
      <select class="in" onchange="IN.doc=this.value"><option value="">— 고르지 않음 —</option>${dd.docs.map(x => `<option value="${x.id}" ${x.id === IN.doc ? 'selected' : ''}>${esc(x.title)} v${x.ver}</option>`).join('')}</select></div>
    <div class="card box"><h3><span class="chip dark">2</span> 검사할 파일 <span class="small muted">사람이 고친 PPT·한글 등</span></h3>
-     <div class="drop" onclick="pickFile(async f=>{IN.tgt.push(await upload(f));vInspect()},true)">파일 올리기 (pptx · hwp · html · docx · pdf)</div>
+     <div class="drop" id="inTgt" onclick="pickFile(async f=>{IN.tgt.push(await upload(f));vInspect()},true)">파일 올리기 (pptx · hwp · hwpx · html · docx · pdf) · 끌어 놓아도 됩니다</div>
      <button class="btn ghost sm" style="margin-top:6px" onclick="demoPick(us=>{IN.tgt.push(...us);vInspect()}, n => n.startsWith('검수시연'))">📂 시연 자료(사람이 고친 PPT)</button>
      <div style="margin-top:8px">${IN.tgt.map((f, i) => `<div class="out-f row"><span>${f.drm ? '🔐' : '📄'}</span><b class="grow">${esc(f.name)}</b><button class="x" onclick="IN.tgt.splice(${i},1);vInspect()">✕</button></div>`).join('')}</div>
      <label class="small" style="margin-top:10px;display:block">팩 규칙도 함께(선택)</label>
