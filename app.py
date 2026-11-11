@@ -19,6 +19,7 @@ import yaml
 from flask import Flask, abort, g, has_request_context, jsonify, request, send_file, send_from_directory, session
 
 import checks
+import clone
 import core
 import corp
 import doc_themes
@@ -177,7 +178,7 @@ def tpl_view(t, u):
         up = list(reversed((info.get('chain') or [])[:-1])) + ['전사']
         o['skill'] = f"{info['id']}@{info.get('version', '')} ← " + ' ← '.join(up)
     else:
-        e = engines.fill_engine(info['corp']) if info.get('fill') else engines.engine_of(t['fmt'])
+        e = engines.fill_engine(engines.fill_cid(info)) if info.get('fill') else engines.engine_of(t['fmt'])
         o['skill'] = f"전사 {e['name']}@{e['sha']}"
     o['usable'] = core.can_use_template(t, u, g.net)
     o['blocked'] = '대외비 양식은 인터넷망에서 쓸 수 없습니다' if g.net == 'internet' and t['grade'] == 'c' else ''
@@ -444,8 +445,8 @@ def _fill_of(template_id):
     info = (J(t['skill'], {}) or {}) if t else {}
     if not info.get('fill'):
         return None
-    e = engines.fill_engine(info['corp'])
-    return {'corp': info['corp'], 'sha': e['sha'], 'name': info['fill'].get('name', ''), 'fmts': [corp.fill_fmt(info['fill'])]}
+    e = engines.fill_engine(engines.fill_cid(info))
+    return {'corp': e['corp'], 'sha': e['sha'], 'name': info['fill'].get('name', ''), 'fmts': [corp.fill_fmt(info['fill'])]}
 
 
 def _tpl_for_llm(t):
@@ -914,7 +915,7 @@ def skill_view(sid, s, allsk, u, full=False):
     r = skills.resolve(sid, allsk)
     o = {'id': sid, 'name': s.get('name'), 'version': s.get('version'), 'scope': _scope_of(s), 'org': s.get('org', ''), 'owner': s.get('owner', ''),
          'share': s.get('share', ''), 'path': s['_path'], 'chain': r['levels'], 'corp': r['resolution']['corp'], 'tags': skills.tags_of(sid)[:8],
-         'forms': [{'id': f['id'], 'name': f['name'], 'fmt': f['fmt'], 'outline': f.get('outline', []),
+         'forms': [{'id': f['id'], 'name': f['name'], 'fmt': f['fmt'], 'outline': f.get('outline', []), 'clone': bool(f.get('fill')),
                     'style': checks.style_label(f.get('style') or r.get('style')) if (f.get('style') or r.get('style')) else ''} for f in s.get('forms') or []],
          'errors': skills.validate(s, allsk), 'can_change': _can_change(s, u), 'verification': s.get('verification')}
     if full:
@@ -1007,7 +1008,12 @@ def _report_md(rep):
     lines = ['| 기준 | 결과 | 내용 |', '|---|---|---|']
     for c in rep.get('criteria', []):
         lines.append(f"| {c['name']} | {'✅' if c['pass'] else '❌'} | {_public_detail(c, rep)} |")
-    lines.append(f"\n스킬 사용 {rep.get('with_score', 0)}점 / 미사용 {rep.get('without_score', 0)}점")
+    if rep.get('mode') == 'clone':
+        fid = rep.get('fidelity') or {}
+        lines.append(f"\n복제형 — 서식의 고정 글 {fid.get('fixed_chars', '-')}자 · 칸 {fid.get('slots', '-')}개. 되만들기 시험: 대표 문서 {len(fid.get('docs') or [])}건 중 "
+                     f"{sum(1 for d in fid.get('docs') or [] if d.get('identical'))}건이 원본과 글자 · 구성 · 모양이 같음")
+    else:
+        lines.append(f"\n스킬 사용 {rep.get('with_score', 0)}점 / 미사용 {rep.get('without_score', 0)}점")
     st = rep.get('style') or {}
     if st and not st.get('default'):
         lines.append(f"\n문체 기준(대표 문서에서 잼): {st.get('label', '')} — {st.get('basis', '')}")
@@ -1120,6 +1126,177 @@ def _highlights(docs, fixed, outline):
     return out
 
 
+# ───────────── 복제형 스킬 — 원본을 서식으로 삼고 바뀌는 칸만 비운다(clone.py) ─────────────
+def _clone_dir(jid):
+    d = os.path.join(engines.JOBS, 'skillgen', jid)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _slot_ctx(s, same_line):
+    """칸 앞뒤의 고정 글. 같은 줄의 다른 칸은 ▢로 가린다(값이 이름 붙이기 요청·화면에 섞이지 않게)."""
+    left, right, off = s['left'], s['right'], s['span'][1]
+    for o in sorted(same_line, key=lambda x: -x['span'][0]):
+        if o is s:
+            continue
+        if o['span'][1] <= s['span'][0]:
+            left = left[:o['span'][0]] + '▢' + left[o['span'][1]:]
+        else:
+            right = right[:o['span'][0] - off] + '▢' + right[o['span'][1] - off:]
+    return clone.PUA.sub('', left)[-40:], clone.PUA.sub('', right)[:40]
+
+
+def _clone_job(hw, others, req_text, scope, name):
+    """한글 대표 문서 2건 이상 → 복제형 스킬 초안. 돌려주는 값: (job 응답, None) 또는 (None, 만들지 못한 이유)."""
+    if not clone.ready():
+        return None, f'칸 채우기 부품이 든 전사 스킬({clone.ENGINE})이 잠금 파일에 없습니다'
+    heads = extract.read(hw[0]['path'], hw[0]['name'])['heads']
+    an = clone.analyze([f['path'] for f in hw], [f['name'] for f in hw], heads)
+    if not an['ok']:
+        return None, an['reason']
+    by = {}
+    for s in an['slots']:
+        by.setdefault(s['node'], []).append(s)
+    for s in an['slots']:
+        s['before'], s['after'] = _slot_ctx(s, by[s['node']])
+    # ③ 칸 이름 붙이기 — AI의 일은 여기까지다(글자는 코드가 원본에서 옮긴다)
+    reps = {}                                   # 값이 늘 같은 칸들은 한 칸으로 묶여 있다(group) — 묶음마다 한 번만 이름을 묻는다
+    for s in an['slots']:
+        reps.setdefault(s['group'], s)
+    named, meta = llm.name_slots([{'id': gid, 'label': next((x['label'] for x in an['slots'] if x['group'] == gid and x['label']), ''),
+                                   'places': [{k: x[k] for k in ('section', 'before', 'after')} for x in an['slots'] if x['group'] == gid][:4],
+                                   'values': s['values']} for gid, s in reps.items()], ai_ctx(fast=True))
+    keys = clone.make_keys(an['slots'], {gid: v.get('label') for gid, v in named.items()})
+    jid = core.new_id('j')
+    tpl = os.path.join(_clone_dir(jid), 'form.hwp')
+    built = clone.build(hw[0]['path'], an, keys, tpl)
+    if not built['ok']:
+        return None, '서식을 만들지 못했습니다 — ' + '; '.join(built['problems'])[:300]
+    sections = []
+    for gid, s in reps.items():
+        h = s['section'] or '문서 정보'
+        sec = next((x for x in sections if x['heading'] == h), None)
+        if not sec:
+            sec = {'heading': h, 'fields': []}
+            sections.append(sec)
+        f = {'key': keys[s['id']], 'label': keys[s['id']], 'required': all(v.strip() for v in s['values'])}
+        # 적는 법: AI가 붙인 설명 + 서식에서 이 칸의 앞뒤에 이미 적혀 있는 글(값에 그 글을 다시 넣지 않도록 문서를 쓸 때 AI에게도 보여 준다)
+        where = max((x for x in an['slots'] if x['group'] == gid), key=lambda x: len(x['before'].strip()) + len(x['after'].strip()))
+        spot = f"서식의 자리: “{where['before'][-16:]}▢{where['after'][:16]}”" if (where['before'].strip() or where['after'].strip()) else ''
+        hint = ' · '.join(x for x in (named[gid].get('hint') or '', spot) if x)
+        if hint:
+            f['hint'] = hint
+        df = clone.date_format(s['values'])
+        if df:
+            f['date'] = df
+        sec['fields'].append(f)
+    fname = name[:40].replace(' 팩', '')
+    first = next((f['key'] for sec in sections for f in sec['fields'] if f['required'] and re.fullmatch(r'\w+', f['key'])), '')
+    fill = {'kind': 'hwp-fill', 'engine': clone.ENGINE, 'template': 'templates/form.hwp',
+            'title': f'{fname} ({{{first}}})' if first else fname, 'sections': sections}
+    draft = {'id': _slug('hwp-form', g.u['id']), 'name': name[:40], 'scope': 'user' if scope == 'me' else 'org', 'version': '1.0.0', 'grade': 'i',
+             'extends': [f'corp:{clone.ENGINE}'],
+             'forms': [{'id': 'main', 'name': fname, 'fmt': 'hwp', 'use': '문서', 'outline': [x['heading'] for x in sections],
+                        'desc': f"한글 대표 문서 {len(hw)}건을 맞대어 만든 복제형 서식 — 원본의 글과 모양은 그대로, 칸 {an['fields']}개만 채운다",
+                        'blocks': [], 'fill': fill}],
+             'blocks': [], 'glossary': {'terms': {}, 'banned': []}, 'checks': {'required': [], 'banned': []}, 'rules': []}
+    if scope == 'me':
+        draft['owner'] = g.u['id']
+    else:
+        draft['org'] = g.u['dept'] if scope == 'dept' else f"{g.u['dept']}/{g.u['team']}"
+        draft['owner'] = g.u['name']
+    # 화면용: 기준 문서의 줄마다 칸 자리를 [칸 이름]으로 보여 준다
+    lines = []
+    for i, text in an['base_text']:
+        ss = sorted(by.get(i, []), key=lambda x: -x['span'][0])
+        for x in ss:
+            text = text[:x['span'][0]] + f"[{keys[x['id']]}]" + text[x['span'][1]:]
+        lines.append({'t': clone.PUA.sub('', text).strip()[:160], 'k': 'var' if ss else 'fixed'})
+    analysis = {'mode': 'clone', 'base': None, 'parent': None, 'meta': meta, 'fields': [],
+                'highlights': [{'name': hw[0]['name'] + ' — 기준 문서(이 파일이 서식이 됩니다)', 'lines': lines}],
+                'docs': [{'name': f['name'], 'heads': [], 'kind': f['kind']} for f in hw],
+                'clone': {'ok': True, 'docs': an['docs'], 'file_ids': [f['id'] for f in hw], 'skipped': [f['name'] for f in others],
+                          'lines': an['lines'], 'text_lines': an['text_lines'], 'var_lines': an['var_lines'], 'fixed_ratio': an['fixed_ratio'],
+                          'fixed_chars': an['fixed_chars'], 'slot_chars': an['slot_chars'], 'template': tpl, 'fields': an['fields'],
+                          'slots': [{'id': s['id'], 'key': keys[s['id']], 'group': s['group'], 'rule_label': s['label'], 'section': s['section'] or '문서 정보',
+                                     'before': s['before'], 'after': s['after'], 'values': s['values']} for s in an['slots']]}}
+    g.con.execute('insert into skill_jobs values(?,?,?,?,?,?,?,?,?,?,?,?)',
+                  (jid, g.u['id'], req_text, scope, 'analyzed', json.dumps([f['id'] for f in hw], ensure_ascii=False), json.dumps(analysis, ensure_ascii=False),
+                   json.dumps(draft, ensure_ascii=False), '', '', now(), now()))
+    log(g.u['name'], f"스킬 빌더 ② 분석(복제형) — 한글 {len(hw)}건을 맞대어 칸 {an['fields']}개({len(an['slots'])}곳) · 고정 {an['fixed_ratio'] * 100:.0f}% · 칸 이름 {meta['label']} {meta['ms']}ms")
+    return {'id': jid, 'draft': draft, 'analysis': analysis, 'scope': scope}, None
+
+
+def _evaluate_clone(j, draft, analysis):
+    """④ 되만들기 시험: 서식에 각 대표 문서의 칸 값을 넣어 다시 만들고 원본과 글자 · 구성 · 모양을 비교한다(AI 없이 코드로)."""
+    cl = analysis['clone']
+    files = _uploads(cl['file_ids'])
+    form = draft['forms'][0]
+    fill = form.get('fill') or {}
+    tpl = cl['template']
+    if not os.path.exists(tpl) or len(files) != len(cl['docs']):
+        return err('대표 문서나 서식 파일이 이 PC에 남아 있지 않습니다. ② 분석부터 다시 해 주세요')
+    want = sorted({s['key'] for s in cl['slots']})
+    nf = len(want)
+    if sorted(f.get('key') for sec in fill.get('sections') or [] for f in sec.get('fields') or []) != want:
+        return err('칸의 key는 서식 파일에 들어 있어 바꾸거나 지울 수 없습니다. 화면에 보이는 이름(label)만 고쳐 주세요')
+    errs = skills.validate(draft, skills.all_skills())
+    jd = _clone_dir(j['id'])
+    docs = []
+    for k, f in enumerate(files):
+        out = os.path.join(jd, f'remake_{k + 1}.hwp')
+        made, warns = clone.remake(tpl, {s['key']: s['values'][k] for s in cl['slots']}, out)
+        c = clone.compare(f['path'], out) if made else {'text': [0, 0], 'struct': [0, 0], 'shape': [0, 0], 'identical': False, 'bytes_same': False, 'diffs': []}
+        docs.append({'doc': f['name'], 'made': made, 'warns': warns, **{x: c[x] for x in ('text', 'struct', 'shape', 'identical', 'bytes_same', 'diffs')}})
+    left = clone.leftovers(tpl, {'slots': cl['slots']})
+    # 참고: AI가 대표 문서의 글에서 칸 값을 찾아 넣는가(문서를 새로 만들 때 AI가 하는 일). 정답은 맞대기에서 이미 안다
+    ai = [None] * len(files)
+    ctx = ai_ctx(fast=True)
+    nrm = lambda v: re.sub(r'\s+', '', str(v or ''))
+
+    def find(k, f):
+        try:
+            bp, m = llm.blueprint({'fill': fill, 'name': form['name']}, '아래 문서와 같은 내용으로 이 서식의 칸을 채워 줘.\n\n' + (f['text'] or '')[:8000], [], ctx)
+            got = fillform.to_values(bp, fill)['fields']
+            truth = {s['key']: s['values'][k] for s in cl['slots']}
+            miss = [key for key, v in truth.items() if nrm(got.get(key)) != nrm(v)]
+            ai[k] = {'doc': f['name'], 'hit': nf - len(miss), 'n': nf, 'mode': m['mode'], 'ms': m['ms'], 'miss': miss[:8]}
+        except Exception as e:
+            ai[k] = {'doc': f['name'], 'hit': 0, 'n': nf, 'mode': 'error', 'ms': 0, 'miss': [], 'error': str(e)[:120]}
+
+    th = [threading.Thread(target=find, args=(k, f)) for k, f in enumerate(files)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(timeout=600)
+    ai = [a for a in ai if a]
+    used = [a for a in ai if a['mode'] == 'llm']
+    pii = [e for e in errs if e.startswith('보안')]
+    need = 1 if draft.get('scope') == 'user' else 3
+    frac = lambda key: ' · '.join(f"문서 {i + 1}: {d[key][0]}/{d[key][1]}" for i, d in enumerate(docs))
+    full = lambda key: bool(docs) and all(d['made'] and d[key][1] and d[key][0] == d[key][1] for d in docs)
+    crit = [
+        {'id': 'f_text', 'name': '글자 재현 — 원본과 줄 단위로 같음', 'pass': full('text'), 'detail': frac('text')},
+        {'id': 'f_struct', 'name': '구성 재현 — 문단 · 표 · 칸의 순서와 병합', 'pass': full('struct'), 'detail': frac('struct')},
+        {'id': 'f_shape', 'name': '모양 재현 — 문단 모양 · 글자 모양 · 칸 테두리', 'pass': full('shape'), 'detail': frac('shape')},
+        {'id': 'f_clean', 'name': '서식에 대표 문서의 값이 남지 않음', 'pass': not left, 'detail': f'남은 값 {len(left)}건' if left else f"칸 {nf}개({len(cl['slots'])}곳)를 모두 비움"},
+        {'id': 'security', 'name': '보안(실명·연락처·계좌 없음)', 'pass': not pii, 'detail': '; '.join(pii)},
+        {'id': 'f_ai', 'name': '참고 — AI가 대표 문서의 글에서 칸 값을 찾음', 'pass': True, 'info': True,
+         'detail': ' · '.join(f"문서 {i + 1}: {a['hit']}/{a['n']}칸" for i, a in enumerate(ai)) if used else 'AI를 쓰지 않아 재지 않음'},
+        {'id': 'human', 'name': f'사람 확인(시범 작성 {need}건 👍)', 'pass': False, 'detail': '아래에서 확인', 'human': need},
+    ]
+    report = {'mode': 'clone', 'criteria': crit, 'tasks': [], 'errors': errs,
+              'fidelity': {'docs': docs, 'slots': nf, 'places': len(cl['slots']), 'fixed_ratio': cl['fixed_ratio'], 'fixed_chars': cl['fixed_chars'],
+                           'slot_chars': cl['slot_chars'], 'left': left[:8]},
+              'ai': ai, 'auto_pass': all(c['pass'] for c in crit if c['id'] != 'human') and not errs,
+              # 강제 등록: 재현도 미통과는 사유를 남기고 넘길 수 있지만, 스킬 파일 검사 오류 · 보안 · 서식에 남은 값은 넘길 수 없다
+              'can_force': not errs and not pii and not left, 'upload': _upload_notice(draft, tpl)}
+    g.con.execute("update skill_jobs set skill=?, report=?, stage='evaluated', updated=? where id=?",
+                  (json.dumps(draft, ensure_ascii=False), json.dumps(report, ensure_ascii=False), now(), j['id']))
+    log(g.u['name'], f"스킬 빌더 ④ 되만들기 시험 — {draft['id']} · 문서 {len(docs)}건 중 {sum(1 for d in docs if d['identical'])}건 원본과 같음 · 자동 기준 {'통과' if report['auto_pass'] else '미통과'}")
+    return ok(report=report, draft=draft, analysis=analysis)
+
+
 @app.post('/api/skillgen/analyze')
 @login_required
 def skillgen_analyze():
@@ -1133,6 +1310,22 @@ def skillgen_analyze():
     for f in files:
         r = extract.read(f['path'], f['name'])
         docs.append({'name': f['name'], 'text': f['text'] or '', 'heads': r['heads'], 'kind': f['kind']})
+    name0 = (req_text and re.sub(r'\s*(스킬|팩)?\s*(만들어\s*줘|만들어|생성해\s*줘|해\s*줘)\s*$', '', req_text).strip(' ."')) or files[0]['name'].rsplit('.', 1)[0][:30]
+    if not name0.endswith(('팩', '스킬')):
+        name0 += ' 팩'
+    hw = [f for f in files if f['kind'] == 'hwp']
+    why = ''
+    if b.get('mode') == 'compose':
+        why = '조립형으로 만들도록 골랐습니다'
+    elif len(hw) >= 2:                          # 한글 대표 문서가 2건 이상이면 먼저 복제형(원본을 서식으로)으로 만들어 본다
+        try:
+            job, why = _clone_job(hw, [f for f in files if f['kind'] != 'hwp'], req_text, scope, name0)
+        except Exception as e:
+            job, why = None, f'복제형 분석 중 오류: {str(e)[:160]}'
+        if job:
+            return ok(job=job)
+    elif hw:
+        why = '같은 종류의 한글 문서가 2건 이상 있어야 바뀌는 칸을 찾을 수 있습니다'
     # 문체는 AI가 아니라 코드가 대표 문서 글에서 잰다(종결 형태·날짜 형식·항목 길이). 보고서가 아닌 문서(계약서·공문 등)는 그 문서 기준으로 쓰고 검증한다.
     style = checks.measure_style([d['text'] for d in docs])
     prose = not checks.is_default_style(style)
@@ -1179,7 +1372,8 @@ def skillgen_analyze():
         draft['org'] = g.u['dept'] if scope == 'dept' else f"{g.u['dept']}/{g.u['team']}"
         draft['owner'] = g.u['name']
     jid = core.new_id('j')
-    analysis = {'base': {'id': base['id'], 'name': base['name'], 'similarity': sim} if base else None,
+    analysis = {'mode': 'compose', 'clone': {'ok': False, 'reason': why} if why else None,
+                'base': {'id': base['id'], 'name': base['name'], 'similarity': sim} if base else None,
                 'parent': {'id': parent['id'], 'name': parent['name'], 'version': parent['version']} if parent else None,
                 'highlights': _highlights(docs, blocks, outline), 'fields': out.get('fields') or [], 'meta': meta,
                 'style': {**style, 'label': checks.style_label(style), 'default': not prose},
@@ -1207,10 +1401,12 @@ def _bp_score(bp, form, blocks, memo, allowed='', fixed=()):
     got = checks.extract_values(text)
     lost = [v['raw'] for v in src_vals if not any(abs(x['value'] - v['value']) < 1e-9 and x['unit'] == v['unit'] for x in got)]
     def derived(x):
+        # 원본의 숫자 몇 개(2~4개)를 더한 값은 합계로 본다(표의 단계별 기간 1 + 3 + 1 = 5개월 등)
+        import itertools
         same = [v['value'] for v in src_vals if v['unit'] == x['unit']]
         if abs(sum(same) - x['value']) < 1e-9:
             return True
-        return any(abs(a + c - x['value']) < 1e-9 for i, a in enumerate(same) for c in same[i + 1:])
+        return any(abs(sum(c) - x['value']) < 1e-9 for n in (2, 3, 4) for c in itertools.combinations(same[:12], n))
     new = [x['raw'] for x in got if x['unit'] not in ('일', '회') and not any(abs(x['value'] - v['value']) < 1e-9 for v in src_vals) and not derived(x)]
     gram = [c for c in engines.check(bp, (), form.get('style'), fixed) if c['id'] in ('date', 'long', 'end') and not c['ok']]   # 이 양식의 문체 기준
     return {'struct': round(struct, 3), 'fixed': fixed_ok, 'lost': lost[:5], 'new': new[:5], 'grammar': [c['name'] for c in gram]}
@@ -1252,6 +1448,8 @@ def skillgen_evaluate(jid):
         abort(404)
     b = request.json or {}
     draft = b.get('draft') or J(j['skill'])
+    if (J(j['analysis'], {}) or {}).get('mode') == 'clone':
+        return _evaluate_clone(j, draft, J(j['analysis'], {}))
     allsk = skills.all_skills()
     form = draft['forms'][0]
     blocks = [x for x in draft.get('blocks') or [] if x['id'] in (form.get('blocks') or [])] or draft.get('blocks') or []
@@ -1334,6 +1532,27 @@ def skillgen_evaluate(jid):
     return ok(report=report, draft=draft, analysis=analysis)
 
 
+def _clone_md(d, report):
+    form = d['forms'][0]
+    fill = form['fill']
+    fid = (report or {}).get('fidelity') or {}
+    rows = '\n'.join(f"| {sec['heading']} | {f.get('label', f['key'])} | {'필수' if f.get('required') else ''} | {f.get('hint', '')} |" for sec in fill['sections'] for f in sec['fields'])
+    score = '\n'.join(f"| 문서 {i + 1} | {x['text'][0]}/{x['text'][1]} | {x['struct'][0]}/{x['struct'][1]} | {x['shape'][0]}/{x['shape'][1]} | {'같음' if x['identical'] else '다름'} |"
+                      for i, x in enumerate(fid.get('docs') or []))
+    v = d.get('verification') or {}
+    forced = (f"\n> ⚠️ **검증 미통과 상태로 강제 등록됨** ({v.get('date', '')}, {v.get('by', '')})\n> - 미통과: {' / '.join(v.get('failed') or [])}\n> - 사유: {v.get('reason', '')}\n"
+              if v.get('status') == 'forced' else '')
+    return (f"---\nname: {d['id']}\ndescription: {d['name']} — 한글 서식의 칸을 채워 같은 모양의 문서를 만든다(복제형). 서식의 글과 모양은 바꾸지 않고 칸 값만 넣는다.\n---\n\n"
+            f"# {d['name']}\n\n- 방식: **복제형** — 대표 문서를 서식(`{fill['template']}`)으로 삼고, 문서마다 바뀌는 칸만 비웠다. 문서를 다시 그리지 않는다.\n"
+            f"- 칸 채우기 부품: 전사 스킬 `{fill['engine']}` (Inspect · TemplateMaker · FillRenderer, hwplib)\n"
+            f"- 서식의 고정 글: {fid.get('fixed_chars', '-')}자 · 칸: {fid.get('slots', '-')}개\n\n"
+            f"## 칸\n| 묶음 | 이름 | 필수 | 적는 법 |\n|---|---|---|---|\n{rows}\n\n"
+            f"## 쓰는 법\n1. 요청과 자료에서 칸 값만 찾는다. 서식에 든 문장은 쓰지 않는다.\n2. 자료에 없는 값은 비워 둔다. 금액 · 날짜 · 이름을 짐작하지 않는다.\n"
+            f"3. 값을 `values.json`(`fields`)으로 넘겨 `FillRenderer 서식.hwp values.json 결과.hwp`로 만든다.\n\n"
+            f"## 되만들기 시험\n서식에 각 대표 문서의 칸 값을 넣어 다시 만들고 원본과 비교했다. 대표 문서 파일과 칸 값은 저장소에 올리지 않았다.\n\n"
+            f"| 대표 문서 | 글자 | 구성 | 모양 | 원본과 |\n|---|---|---|---|---|\n{score}\n{forced}")
+
+
 def _skill_md(d, analysis):
     form = d['forms'][0]
     blocks = '\n'.join(f"- {b.get('heading') or '고정'}: {b['text']}" for b in d.get('blocks') or []) or '- (없음)'
@@ -1358,6 +1577,19 @@ def _skill_files(draft, report, analysis):
     대표 문서의 원문은 올리지 않는다: 검증 과제 메모(대표 문서에서 뽑은 줄)는 이 PC의 작업 기록에만 두고,
     저장소에는 기대 구성·고정 문구와 채점 결과(빠진 숫자·새 숫자는 값이 아니라 건수)만 올린다."""
     path = skills.skill_dir(draft)
+    if (analysis or {}).get('mode') == 'clone':
+        # 복제형: 서식 파일(대표 문서에서 칸 값만 비운 것)이 올라간다. 대표 문서 파일 · 칸 값 · 바꿈표는 올리지 않는다
+        tpl = open(analysis['clone']['template'], 'rb').read()
+        if not tpl.startswith(clone.OLE):
+            raise RuntimeError('서식 파일이 한글 형식이 아닙니다(이 PC의 보호 도구가 암호화했을 수 있음). ② 분석부터 다시 해 주세요')
+        fid = report.get('fidelity') or {}
+        return {f'{path}/kosoe-skill.yaml': skills.dump_skill(draft), f'{path}/SKILL.md': _clone_md(draft, report),
+                f"{path}/{draft['forms'][0]['fill']['template']}": tpl,
+                f'{path}/evals/roundtrip.yaml': yaml.safe_dump(
+                    {'note': '되만들기 시험 — 서식에 각 대표 문서의 칸 값을 넣어 다시 만들고 원본과 비교한 줄 수(같은 줄/전체). 대표 문서와 칸 값은 저장소에 올리지 않는다.',
+                     'slots': fid.get('slots'), 'fixed_chars': fid.get('fixed_chars'), 'slot_chars': fid.get('slot_chars'),
+                     'docs': [{'doc': i + 1, 'text': x['text'], 'struct': x['struct'], 'shape': x['shape'], 'identical': x['identical']}
+                              for i, x in enumerate(fid.get('docs') or [])]}, allow_unicode=True, sort_keys=False)}
     files = {f'{path}/kosoe-skill.yaml': skills.dump_skill(draft), f'{path}/SKILL.md': _skill_md(draft, analysis)}
     for i, t in enumerate(report.get('tasks') or [], 1):
         files[f'{path}/evals/case-{i}/case.yaml'] = yaml.safe_dump(
@@ -1368,8 +1600,19 @@ def _skill_files(draft, report, analysis):
     return files
 
 
-def _upload_notice(draft):
+def _upload_notice(draft, template=None):
     """등록하면 저장소에 무엇이 올라가는지 — 화면에 미리 보여 준다(저장소가 공개인지, 스킬 글에 회사 이름으로 보이는 글이 있는지)."""
+    if template:                                # 복제형: 서식 파일의 고정 글이 그대로 올라간다
+        names = checks.company_names(draft)
+        try:
+            for line in clone.text_lines(clone.read(template)):
+                names += [m.group(0) for m in llm.MASK_RX['고객사명'].finditer(line) if '가상' not in line and m.group(0) not in names]
+        except Exception:
+            pass
+        return {'visibility': skills.visibility(), 'repo': skills.SLUG, 'names': names[:8], 'clone': True,
+                'files': ['kosoe-skill.yaml (칸 정의)', 'SKILL.md', 'templates/form.hwp (대표 문서에서 칸 값만 비운 서식 — 고정된 글과 모양이 그대로 들어 있음)',
+                          'evals/roundtrip.yaml (재현도 점수)'],
+                'not_uploaded': '대표 문서 파일 · 칸에 들어 있던 값 · 바꿈표'}
     return {'visibility': skills.visibility(), 'repo': skills.SLUG, 'names': checks.company_names(draft),
             'files': ['kosoe-skill.yaml (구성 · 고정 문구 · 규칙)', 'SKILL.md', 'evals/case-N/case.yaml (기대 구성 · 채점 결과)'],
             'not_uploaded': '대표 문서 파일과 검증 과제 메모(대표 문서에서 뽑은 줄)'}
@@ -1399,9 +1642,9 @@ def skillgen_submit(jid):
         # 스킬 파일 검사 오류(스키마·상속·잠금)와 보안(개인정보)은 넘길 수 없다.
         if not b.get('force'):
             return err('검증 기준을 모두 통과해야 등록할 수 있습니다' + ('' if report.get('auto_pass') else ' (자동 채점 미통과)'))
-        if report.get('errors') or any(c['id'] == 'security' for c in failed):
-            return err('스킬 파일 검사 오류와 보안(개인정보) 미통과는 강제 등록으로 넘길 수 없습니다: '
-                       + '; '.join((report.get('errors') or []) + [c['detail'] for c in failed if c['id'] == 'security' and c.get('detail')])[:300])
+        if report.get('errors') or any(c['id'] in ('security', 'f_clean') for c in failed):
+            return err('스킬 파일 검사 오류 · 보안(개인정보) · 서식에 남은 값은 강제 등록으로 넘길 수 없습니다: '
+                       + '; '.join((report.get('errors') or []) + [c['detail'] for c in failed if c['id'] in ('security', 'f_clean') and c.get('detail')])[:300])
         reason = re.sub(r'\s+', ' ', str(b.get('reason') or '')).strip()
         if len(reason) < 5:
             return err('강제 등록 사유를 5자 이상 적어 주세요 (PR과 스킬 파일에 남습니다)')
@@ -1415,7 +1658,10 @@ def skillgen_submit(jid):
             return err('검사 실패: ' + '; '.join(errs))
     analysis = J(j['analysis'], {})
     path = skills.skill_dir(draft)
-    files = _skill_files(draft, report, analysis)
+    try:
+        files = _skill_files(draft, report, analysis)
+    except (OSError, RuntimeError) as e:
+        return err(str(e))
     r = _open_skill_request('new', {**draft, '_path': path}, files, g.u, report=report, note=j['request'] or '')
     g.con.execute("update skill_jobs set stage='submitted', skill=?, report=?, request_id=?, updated=? where id=?",
                   (json.dumps(draft, ensure_ascii=False), json.dumps(report, ensure_ascii=False), r['id'], now(), jid))

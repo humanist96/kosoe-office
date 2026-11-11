@@ -634,3 +634,37 @@ def extract(docs, ctx=None, prose=False):
             out.setdefault(k, [])
         return out, ms
     return _try(ctx, llm, rule)
+
+
+# ───────────── 6. 복제형 스킬의 칸 이름 붙이기 ─────────────
+def name_slots(slots, ctx=None):
+    """대표 문서를 맞대어 찾은 칸에 이름을 붙인다. slots = [{'id','label'(규칙이 붙인 이름),'places': [{'section','before','after'}],'values'}]
+    → {id: {'label','hint'}}. AI는 이름만 붙인다 — 문서의 글자는 코드가 원본에서 옮기므로 여기서 틀려도 문서는 틀리지 않는다."""
+    def rule():
+        return {s['id']: {'label': s.get('label') or '', 'hint': ''} for s in slots}
+
+    def llm(M):
+        where = lambda s: ' ; '.join(f"[{p.get('section') or '-'}] “{M(p.get('before') or '')}▢{M(p.get('after') or '')}”" for p in s.get('places') or [])
+        lines = [f"- {s['id']} | 나오는 자리(▢가 이 칸): {where(s)} | 문서별 값: {' / '.join(M(v) or '(빈 칸)' for v in s.get('values') or [])} | "
+                 f"임시 이름: {s.get('label') or '-'}" for s in slots]
+        sys = ('너는 사내 문서 서식 분석가다. 같은 종류의 문서 여러 건을 겹쳐 보아 문서마다 바뀌는 자리(칸)를 찾았다. 칸마다 사람이 알아볼 이름을 붙인다.\n'
+               '- 이름(label)은 2~10자의 명사다(예: 고객사명, 착수일, 사업 기간, 분석 비용). 값 자체를 이름으로 쓰지 않는다.\n'
+               '- 표의 칸은 행 이름과 열 이름을 살린다(예: 구축 기간, 안정화 비용). 임시 이름은 표의 머리글에서 가져온 것이니 그 낱말을 살린다(예: "2행 중분류" → 중분류).\n'
+               '- 한 칸이 여러 자리에 나오면 모든 자리의 앞뒤 글을 보고 뜻을 정한다. 문장 안에서 그 칸을 부르는 말을 따른다(예: 추가 업무는 “▢”로 한다 → 추가 업무명).\n'
+               '- 앞뒤 글이 가리키는 것과 다른 이름을 붙이지 않는다. 확실하지 않으면 임시 이름을 그대로 둔다.\n'
+               '- 서로 다른 칸에 같은 이름을 주지 않는다. 이름에 { } . 을 쓰지 않는다.\n'
+               '- hint는 값을 적는 방법 한 문장이다(예: "법인 형태까지 적는다", "숫자만 적는다. 단위는 서식에 있음"). 문서별 값을 hint에 옮기지 않는다.\n'
+               '- [고객사명1] 같은 대괄호 토큰은 가려 둔 값이다.')
+        user = '칸 목록:\n' + '\n'.join(lines) + '\n\n출력 형식: {"slots": {칸 id: {"label": str, "hint": str}}} (모든 칸 id를 빠짐없이)'
+        out, ms = call_json(sys, user, 1800, fast=True)
+        got = out.get('slots') or {}
+        res = rule()
+        for s in slots:
+            x = got.get(s['id']) or {}
+            lab = re.sub(r'\s+', ' ', _plain(x.get('label'))).strip()
+            if 1 < len(lab) <= 20 and not any(lab == str(v).strip() for v in s.get('values') or []):
+                res[s['id']] = {'label': lab, 'hint': re.sub(r'\s+', ' ', _plain(x.get('hint')))[:80]}
+        if not any(res[s['id']]['label'] != (s.get('label') or '') for s in slots) and not got:
+            raise RuntimeError('칸 이름을 받지 못함')
+        return res, ms
+    return _try(ctx, llm, rule)

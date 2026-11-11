@@ -33,7 +33,7 @@ async function vSkills(sync) {
   <div class="card" style="overflow:hidden"><table class="list"><tr><th>스킬</th><th>상속</th><th>범위</th><th>양식</th><th>버전 태그</th><th>검사</th><th></th></tr>
    ${d.skills.map(s => `<tr class="click" onclick="openSkill('${s.id}')"><td><b>${esc(s.name)}</b><br><span class="small muted"><code>${esc(s.id)}</code> v${esc(s.version)}</span></td>
      <td class="small">${chainHtml(s)}</td><td><span class="chip o">${SCOPE_K[s.scope]}</span><br><span class="small muted">${esc(s.org || '')}${s.share === 'corp' ? ' · 전사 공개' : ''}</span></td>
-     <td class="small">${s.forms.map(f => fmtTag(f.fmt) + ' ' + esc(f.name)).join('<br>') || '<span class="muted">(상위 공통 규칙)</span>'}</td>
+     <td class="small">${s.forms.map(f => fmtTag(f.fmt) + ' ' + esc(f.name) + (f.clone ? ' <span class="chip o" title="대표 문서를 서식으로 삼고 칸만 채우는 스킬">복제형</span>' : '')).join('<br>') || '<span class="muted">(상위 공통 규칙)</span>'}</td>
      <td class="small">${s.tags.slice(0, 3).map(t => `<span class="chip n">${esc(t)}</span>`).join(' ')}</td>
      <td>${s.errors.length ? `<span class="chip bad" title="${esc(s.errors.join('\n'))}">오류 ${s.errors.length}</span>` : '<span class="chip ok">통과</span>'}${forcedChip(s.verification)}</td>
      <td><button class="btn sm ghost">보기</button></td></tr>`).join('')}</table></div>`;
@@ -90,8 +90,9 @@ async function vRegister() {
   <div class="pipe" style="margin-bottom:14px">${['① 첨부·요청', '② 분석', '③ 상속 기반 생성', '④ 충분한 검증', '⑤ 등록(PR)'].map((x, i) => `<span class="st ${i + 1 < st ? 'done' : i + 1 === st ? 'now' : ''}">${x}</span>`).join('')}</div>
   <div class="grid2">
    <div class="card box"><h3><span class="chip dark">1</span> 대표 문서 · 요청</h3>
-     <div class="drop" id="drop" onclick="pickFile(sbAdd,true)">초안·기존 문서 1건 이상 (부서 스킬은 3~5건 권장)<br><span class="small">hwp · pptx · docx · html · pdf · txt — DRM 문서는 자동 차단</span></div>
-     <button class="btn ghost sm" style="margin-top:8px" onclick="demoPick(us => { SB.files.push(...us); sbFiles(); }, n => n.startsWith('대표문서/'))">📂 시연 자료(대표 문서 3건)</button>
+     <div class="drop" id="drop" onclick="pickFile(sbAdd,true)">초안·기존 문서 1건 이상 (부서 스킬은 3~5건 권장)<br><span class="small">hwp · pptx · docx · html · pdf · txt — DRM 문서는 자동 차단</span><br><span class="small">같은 서식의 <b>한글 문서 2건 이상</b>이면 원본을 서식으로 삼는 <b>복제형</b>으로 만듭니다</span></div>
+     <div class="row wrap" style="margin-top:8px"><button class="btn ghost sm" onclick="demoPick(us => { SB.files.push(...us); sbFiles(); }, n => n.startsWith('대표문서/'))">📂 시연 자료(대표 문서 3건)</button>
+       <button class="btn ghost sm" onclick="demoPick(us => { SB.files.push(...us); sbFiles(); }, n => n.startsWith('계약서_3건/'))">📂 시연 자료(한글 계약서 3건 · 복제형)</button></div>
      <div id="sbf" style="margin-top:10px"></div>
      <input class="in" id="sbReq" style="margin-top:10px" placeholder='예) "영업팀 제안서 팩 만들어줘"' value="${esc(SB.request)}" oninput="SB.request=this.value">
      <div class="row" style="margin-top:8px"><span class="small">범위</span><select class="in" style="width:auto" onchange="SB.scope=this.value">${[['me', '나만 (개인 스킬 · 자동 등록)'], ['team', '우리 팀 (팀장 승인)'], ['dept', '우리 본부 (부서 관리자 승인)']].map(([k, v]) => `<option value="${k}" ${k === SB.scope ? 'selected' : ''}>${v}</option>`).join('')}</select>
@@ -120,14 +121,33 @@ function sbFiles() {
   $('#sbf').innerHTML = SB.files.map((u, i) => `<div class="out-f row"><span>${u.drm ? '🔐' : '📄'}</span><div class="grow"><b>${esc(u.name)}</b><br><span class="small ${u.drm ? '' : 'muted'}" style="${u.drm ? 'color:var(--bad)' : ''}">${u.drm ? 'DRM — 내용을 읽지 않았습니다' : `장 제목 ${u.heads.length}개: ${u.heads.slice(0, 6).map(esc).join(' · ')}`}</span></div><button class="x" onclick="SB.files.splice(${i},1);sbFiles()">✕</button></div>`).join('');
   const b = $('#sbGo'); if (b) b.disabled = !SB.files.filter(r => !r.drm).length;
 }
-async function sbAnalyze() {
-  const d = await busy('대표 문서에서 공통 목차·고정 문구·용어를 뽑고 상속할 스킬을 찾는 중…', () => api('/api/skillgen/analyze', {body: {upload_ids: SB.files.filter(r => !r.drm).map(r => r.id), request: SB.request, scope: SB.scope}}));
+async function sbAnalyze(mode) {
+  const hw = SB.files.filter(r => !r.drm && /\.hwp$/i.test(r.name)).length;
+  const d = await busy(mode !== 'compose' && hw >= 2 ? '한글 문서를 줄 단위로 맞대어 바뀌는 칸을 찾고 서식을 만드는 중…' : '대표 문서에서 공통 목차·고정 문구·용어를 뽑고 상속할 스킬을 찾는 중…',
+    () => api('/api/skillgen/analyze', {body: {upload_ids: SB.files.filter(r => !r.drm).map(r => r.id), request: SB.request, scope: SB.scope, mode: mode || 'auto'}}));
   Object.assign(SB, {job: d.job.id, draft: d.job.draft, analysis: d.job.analysis, report: null, thumbs: 0, req: null});
   vRegister();
 }
+// 복제형: 묶인 칸(같은 key)은 한 줄로 보여 준다
+const sbFields = slots => slots.filter((s, i) => slots.findIndex(x => x.key === s.key) === i).map(s => ({...s, places: slots.filter(x => x.key === s.key).length}));
 function sbAnaHtml() {
-  const a = SB.analysis;
+  const a = SB.analysis, c = a.clone;
+  if (a.mode === 'clone') {
+    $('#sbAna').innerHTML = `<h4><span class="chip dark">2</span> 분석 결과 <span class="chip o">복제형</span> <span class="small muted">칸 이름 — ${aiMeta(a.meta)}</span></h4>
+     <div class="out-f small"><b>한글 문서 ${c.docs.length}건을 줄 단위로 맞대어 바뀌는 칸 ${c.fields}개(${c.slots.length}곳)를 찾았습니다.</b><br>
+       구조 ${c.lines}줄이 문서 ${c.docs.length}건에서 같고, 글 ${c.text_lines}줄 중 ${c.var_lines}줄만 문서마다 다릅니다. 고정된 글 <b>${(c.fixed_ratio * 100).toFixed(0)}%</b>(${c.fixed_chars}자) · 칸 ${c.slot_chars}자.<br>
+       <span class="muted">고정된 글과 모양은 코드가 원본에서 그대로 가져옵니다. AI는 칸의 이름만 붙였습니다.</span>
+       ${c.skipped.length ? `<br><span class="muted">한글이 아닌 문서는 맞대기에서 뺐습니다: ${c.skipped.map(esc).join(', ')}</span>` : ''}</div>
+     <div style="overflow-x:auto;margin-top:8px"><table class="list small"><tr><th>칸</th><th>앞뒤의 고정 글</th>${c.docs.map((_, i) => `<th>문서 ${i + 1}의 값</th>`).join('')}</tr>
+       ${sbFields(c.slots).map(s => `<tr><td><b>${esc(s.key)}</b>${s.places > 1 ? ` <span class="chip n">${s.places}곳</span>` : ''}<br><span class="muted">${esc(s.section)}</span></td>
+         <td>${esc(s.before.slice(-12))}<b style="color:var(--o)">▢</b>${esc(s.after.slice(0, 12))}</td>${s.values.map(v => `<td>${esc(v) || '<span class="muted">(빈 칸)</span>'}</td>`).join('')}</tr>`).join('')}</table></div>
+     <div class="hl-legend small"><span class="hl fixed">고정된 줄(원본 그대로)</span><span class="hl var">칸이 든 줄 — [칸 이름]</span></div>
+     ${a.highlights.map(h => `<details class="hl-doc"><summary>📄 ${esc(h.name)}</summary><div class="hl-body">${h.lines.map(l => `<div class="hl ${l.k}">${esc(l.t)}</div>`).join('')}</div></details>`).join('')}
+     <button class="btn ghost sm" style="margin-top:8px" onclick="sbAnalyze('compose')" title="분량이 달라지는 보고서·제안서에 맞습니다">↺ 조립형(전사 표준 서식 + 구성·고정 문구)으로 다시 분석</button>`;
+    return;
+  }
   $('#sbAna').innerHTML = `<h4><span class="chip dark">2</span> 분석 결과 <span class="small muted">${aiMeta(a.meta)}</span></h4>
+   ${c && c.reason ? `<div class="out-f small" style="margin-bottom:6px">ℹ️ <b>조립형</b>으로 만들었습니다(전사 표준 서식 위에 구성·고정 문구를 얹음) — ${esc(c.reason)}</div>` : ''}
    <div class="small">기반 전사 양식: <b>${a.base ? esc(a.base.name) + ` (${esc(a.base.id)}, 유사도 ${a.base.similarity})` : '-'}</b> · 상속할 상위 스킬: <b>${a.parent ? esc(a.parent.name) + ' v' + esc(a.parent.version) : '없음(전사 공용 스킬만)'}</b></div>
    ${a.style ? `<div class="small out-f" style="margin-top:6px">✍️ 문체: <b>${esc(a.style.label)}</b> ${a.style.default ? '<span class="chip">전사 보고 문법 그대로</span>' : '<span class="chip o">이 문서 기준</span>'}<br><span class="muted">${esc(a.style.basis || '')}${a.style.default ? '' : ' — 보고서가 아닌 문서로 보여, 전사 보고 문법 대신 이 문서의 문체로 쓰고 검증합니다.'}</span></div>` : ''}
    <div class="hl-legend small"><span class="hl fixed">고정 문구</span><span class="hl head">공통 목차</span><span class="hl var">바뀌는 칸(숫자·날짜)</span></div>
@@ -135,7 +155,25 @@ function sbAnaHtml() {
 }
 function sbDraftHtml() {
   const D = SB.draft, f = D.forms[0];
-  const lst = (arr, path, ph) => `<div class="lst-ed">${arr.map((x, i) => `<div class="li"><input class="in" value="${esc(x)}" placeholder="${ph}" oninput="${path}[${i}]=this.value;sbYaml()"><button class="x" onclick="${path}.splice(${i},1);sbDraftHtml()">✕</button></div>`).join('')}<button class="btn ghost sm" onclick="${path}.push('');sbDraftHtml()">+ 추가</button></div>`;
+  if (f.fill) {                                 // 복제형: 서식 파일 + 칸 정의. 칸의 자리(key)는 서식에 들어 있어 이름과 적는 법만 고친다
+    const P = 'SB.draft.forms[0].fill.sections';
+    $('#sbDraft').innerHTML = `<h3><span class="chip dark">3</span> 복제형 스킬 초안 <span class="small muted">${esc(D.id)} v${esc(D.version)}</span></h3>
+     <div class="inh">${D.extends.map(e => `<div class="lv corp"><b>칸 채우기 부품</b> ${esc(e)}</div>`).join('')}<div class="lv me"><b>새 스킬</b> ${esc(D.name)} — 서식 <code>${esc(f.fill.template)}</code> + 칸 ${f.fill.sections.reduce((n, s) => n + s.fields.length, 0)}개</div></div>
+     <div class="col" style="margin-top:10px"><label class="small">스킬 이름</label><input class="in" value="${esc(D.name)}" oninput="SB.draft.name=this.value;sbYaml()">
+     <div class="grid3"><div><label class="small">양식 이름</label><input class="in" value="${esc(f.name)}" oninput="SB.draft.forms[0].name=this.value;sbYaml()"></div>
+       <div><label class="small">형식</label><input class="in" disabled value="한글 — 기준 문서의 모양 그대로"></div>
+       <div><label class="small">범위</label><input class="in" disabled value="${D.scope === 'user' ? '개인' : esc(D.org)}"></div></div>
+     <label class="small">칸 — 이름 · 적는 법 · 필수 여부를 고칠 수 있습니다 <span class="muted">(칸의 자리는 서식 파일에 들어 있습니다)</span></label>
+     ${f.fill.sections.map((sec, si) => `<div class="small" style="margin-top:6px"><b>${esc(sec.heading)}</b></div><div class="lst-ed">${sec.fields.map((x, fi) => `<div class="li">
+        <input class="in" style="max-width:150px" value="${esc(x.label)}" oninput="${P}[${si}].fields[${fi}].label=this.value;sbYaml()">
+        <input class="in" value="${esc(x.hint || '')}" placeholder="적는 법 (선택)" oninput="${P}[${si}].fields[${fi}].hint=this.value;sbYaml()">
+        <label class="small" style="white-space:nowrap"><input type="checkbox" ${x.required ? 'checked' : ''} onchange="${P}[${si}].fields[${fi}].required=this.checked;sbYaml()"> 필수</label></div>`).join('')}</div>`).join('')}
+     <details><summary class="small">📁 만들어질 스킬 폴더 미리보기</summary><div class="small muted" style="margin:6px 0"><code>${D.scope === 'user' ? `skills/user/${esc(D.owner)}/${esc(D.id)}/` : `skills/org/${esc(D.org)}/${esc(D.id)}/`}</code> — kosoe-skill.yaml · SKILL.md · templates/form.hwp(서식) · evals/roundtrip.yaml</div><pre class="code" id="sbY"></pre></details>
+     </div>`;
+    sbYaml();
+    return;
+  }
+  const lst =(arr, path, ph) => `<div class="lst-ed">${arr.map((x, i) => `<div class="li"><input class="in" value="${esc(x)}" placeholder="${ph}" oninput="${path}[${i}]=this.value;sbYaml()"><button class="x" onclick="${path}.splice(${i},1);sbDraftHtml()">✕</button></div>`).join('')}<button class="btn ghost sm" onclick="${path}.push('');sbDraftHtml()">+ 추가</button></div>`;
   $('#sbDraft').innerHTML = `<h3><span class="chip dark">3</span> 상속 기반 스킬 초안 <span class="small muted">${esc(D.id)} v${esc(D.version)}</span></h3>
    <div class="inh">${D.extends.map(e => `<div class="lv ${String(e).startsWith('corp:') ? 'corp' : ''}"><b>상속</b> ${esc(e)}</div>`).join('')}<div class="lv me"><b>새 스킬</b> ${esc(D.name)}</div></div>
    <div class="col" style="margin-top:10px"><label class="small">스킬 이름</label><input class="in" value="${esc(D.name)}" oninput="SB.draft.name=this.value;sbYaml()">
@@ -158,25 +196,33 @@ function yamlOf(o, ind = '') {
 }
 function sbYaml() { const e = $('#sbY'); if (e) e.textContent = yamlOf(SB.draft); }
 function sbEvalIntro() {
+  if (SB.analysis && SB.analysis.mode === 'clone') {
+    const n = SB.analysis.clone.docs.length;
+    $('#sbEval').innerHTML = `<h3><span class="chip dark">4</span> 되만들기 시험 <span class="small muted">— 모두 통과해야 등록 버튼이 열립니다</span></h3>
+     <p class="small muted">서식에 대표 문서 ${n}건의 칸 값을 넣어 문서를 다시 만들고, 원본과 <b>글자 · 구성 · 모양</b>을 줄 단위로 비교합니다. 이 비교는 AI 없이 코드가 합니다. 참고로 AI가 문서의 글에서 칸 값을 찾아내는지도 잽니다(AI ${n}회).</p>
+     <button class="btn o" onclick="sbEvaluate()">🧪 ④ 되만들기 시험 실행</button>`;
+    return;
+  }
   $('#sbEval').innerHTML = `<h3><span class="chip dark">4</span> 충분한 검증 <span class="small muted">— 모두 통과해야 등록 버튼이 열립니다</span></h3>
    <p class="small muted">대표 문서마다 과제(메모 → 기대 구성·고정 문구·숫자)를 만들어 <b>이 스킬을 쓸 때</b>와 <b>안 쓸 때</b> 초안을 각각 만들고 7개 기준으로 채점합니다. 대표 문서 ${SB.files.filter(f => !f.drm).length}건 × 2회 AI 호출.</p>
    <button class="btn o" onclick="sbEvaluate()">🧪 ④ 검증 실행</button>`;
 }
 async function sbEvaluate() {
-  const d = await busy('검증 과제를 스킬 사용/미사용으로 채점하는 중… (AI 여러 번 호출)', () => api(`/api/skillgen/${SB.job}/evaluate`, {body: {draft: SB.draft}}));
+  const d = await busy(SB.analysis && SB.analysis.mode === 'clone' ? '서식으로 대표 문서를 다시 만들어 원본과 비교하는 중…' : '검증 과제를 스킬 사용/미사용으로 채점하는 중… (AI 여러 번 호출)', () => api(`/api/skillgen/${SB.job}/evaluate`, {body: {draft: SB.draft}}));
   SB.report = d.report; SB.draft = d.draft; if (d.analysis) SB.analysis = d.analysis; SB.thumbs = 0; vRegister();
 }
 function sbEvalHtml() {
   const R = SB.report, need = R.criteria.find(c => c.id === 'human').human;
   const humanOk = SB.thumbs >= need, all = R.auto_pass && humanOk;
-  $('#sbEval').innerHTML = `<h3><span class="chip dark">4</span> 검증 리포트 <span class="chip ${R.auto_pass ? 'ok' : 'bad'}">${R.auto_pass ? '자동 기준 통과' : '자동 기준 미통과'}</span></h3>
+  $('#sbEval').innerHTML = `<h3><span class="chip dark">4</span> ${R.mode === 'clone' ? '되만들기 시험 — 재현도 성적표' : '검증 리포트'} <span class="chip ${R.auto_pass ? 'ok' : 'bad'}">${R.auto_pass ? '자동 기준 통과' : '자동 기준 미통과'}</span></h3>
    <div class="grid2"><div>${R.criteria.map(c => {
       const pass = c.id === 'human' ? humanOk : c.pass;
+      if (c.info) return `<div class="check"><span class="i" style="background:var(--line);color:var(--ink)">i</span><span class="grow"><b>${esc(c.name)}</b><br><span class="small muted">${esc(c.detail || '')} — 등록 기준에는 넣지 않습니다</span></span></div>`;
       return `<div class="check"><span class="i ${pass ? 'ok' : 'no'}">${pass ? '✓' : '!'}</span><span class="grow"><b>${esc(c.name)}</b>${c.detail ? `<br><span class="small muted">${esc(c.id === 'human' ? `${SB.thumbs}/${need}건 확인` : c.detail)}</span>` : ''}</span></div>`;
     }).join('')}
     ${R.errors.length ? `<div class="small" style="color:var(--bad);margin-top:6px">${R.errors.map(esc).join('<br>')}</div>` : ''}</div>
-   <div><div class="kpis" style="grid-template-columns:1fr 1fr;margin:0"><div class="card kpi"><div class="l">스킬 사용</div><div class="v">${R.with_score}<small>/${R.full}</small></div></div><div class="card kpi"><div class="l">스킬 미사용</div><div class="v">${R.without_score}<small>/${R.full}</small></div></div></div>
-    ${R.tasks.map((t, i) => `<details class="hl-doc"><summary class="small">과제 ${i + 1} · ${esc(t.doc)} · 구성 ${(t.with.struct * 100).toFixed(0)}% vs ${(t.without.struct * 100).toFixed(0)}% · ${t.mode === 'llm' ? 'AI' : '규칙'}</summary><pre class="code small">${esc(t.memo)}</pre></details>`).join('')}
+   <div>${R.mode === 'clone' ? sbFidelity(R) : `<div class="kpis" style="grid-template-columns:1fr 1fr;margin:0"><div class="card kpi"><div class="l">스킬 사용</div><div class="v">${R.with_score}<small>/${R.full}</small></div></div><div class="card kpi"><div class="l">스킬 미사용</div><div class="v">${R.without_score}<small>/${R.full}</small></div></div></div>
+    ${R.tasks.map((t, i) => `<details class="hl-doc"><summary class="small">과제 ${i + 1} · ${esc(t.doc)} · 구성 ${(t.with.struct * 100).toFixed(0)}% vs ${(t.without.struct * 100).toFixed(0)}% · ${t.mode === 'llm' ? 'AI' : '규칙'}</summary><pre class="code small">${esc(t.memo)}</pre></details>`).join('')}`}
     <div style="margin-top:10px"><b class="small">사람 확인 — 담당자 시범 작성 ${need}건</b><div class="row wrap" style="margin-top:6px">${Array.from({length: need}, (_, i) => `<button class="btn sm ${i < SB.thumbs ? '' : 'ghost'}" onclick="SB.thumbs=${i + 1};sbEvalHtml()">${i < SB.thumbs ? '👍' : '○'} 시범 ${i + 1}</button>`).join('')}</div></div></div></div>
    <div class="row wrap" style="margin-top:12px"><button class="btn ghost" onclick="sbEvaluate()">↻ 다시 검증</button>
      <button class="btn o" ${all ? '' : 'disabled'} onclick="sbSubmit()">📮 ⑤ 등록 요청 (브랜치 · PR${SB.draft.scope === 'user' ? ' · 자동 검사 후 병합' : ' · 관리자 승인'})</button>
@@ -184,6 +230,19 @@ function sbEvalHtml() {
        <button class="btn red" ${R.can_force === false ? 'disabled' : ''} onclick="sbForce()" title="미통과 항목과 사유를 PR·스킬 파일에 남기고 등록합니다">⚠️ 미통과 항목이 있어도 등록</button>
        ${R.can_force === false ? '<span class="small" style="color:var(--bad)">스킬 파일 검사 오류·보안(개인정보) 미통과는 강제 등록할 수 없습니다</span>' : ''}`}</div>
    ${sbUploadNote(R.upload)}`;
+}
+// 복제형의 재현도 성적표: 서식으로 대표 문서를 다시 만들어 원본과 비교한 줄 수(같은 줄/전체)
+function sbFidelity(R) {
+  const F = R.fidelity, all = F.docs.length && F.docs.every(d => d.identical);
+  const pct = F.fixed_chars + F.slot_chars ? (F.slot_chars / (F.fixed_chars + F.slot_chars) * 100).toFixed(0) : '-';
+  return `<div class="kpis" style="grid-template-columns:1fr 1fr;margin:0"><div class="card kpi"><div class="l">원본과 같게 되만든 문서</div><div class="v">${F.docs.filter(d => d.identical).length}<small>/${F.docs.length}</small></div></div>
+     <div class="card kpi"><div class="l">사람이 확인할 분량(칸 ${F.slots}개)</div><div class="v">${pct}<small>%</small></div></div></div>
+   <div style="overflow-x:auto;margin-top:8px"><table class="list small"><tr><th>대표 문서</th><th>글자</th><th>구성</th><th>모양</th><th>원본과</th></tr>
+     ${F.docs.map((d, i) => `<tr><td><b>문서 ${i + 1}</b><br><span class="muted">${esc(d.doc)}</span></td><td>${d.text[0]}/${d.text[1]}</td><td>${d.struct[0]}/${d.struct[1]}</td><td>${d.shape[0]}/${d.shape[1]}</td>
+       <td>${d.identical ? `<span class="chip ok">같음</span>${d.bytes_same ? '<br><span class="muted">파일 바이트까지</span>' : ''}` : '<span class="chip bad">다름</span>'}</td></tr>`).join('')}</table></div>
+   <div class="small muted" style="margin-top:6px">글자 = 문단의 글 · 구성 = 문단 · 표 · 칸의 순서와 병합 · 모양 = 문단 모양 · 글자 모양 구간 · 칸 테두리 번호. 같은 줄 수 / 전체 줄 수. ${all ? '서식의 고정 글 ' + F.fixed_chars + '자는 원본 그대로이므로, 문서를 만들 때 사람은 칸 값만 확인하면 됩니다.' : ''}</div>
+   ${F.docs.filter(d => d.diffs.length || d.warns.length).map(d => `<details class="hl-doc" open><summary class="small">원본과 다른 곳 · ${esc(d.doc)}</summary><div class="small" style="padding:6px 8px">${d.warns.map(w => `<div>⚠️ ${esc(w)}</div>`).join('')}${d.diffs.map(x => `<div><span class="chip n">${esc(x.layer)}</span> 원본 <code>${esc(x.want)}</code> → 되만든 문서 <code>${esc(x.got)}</code>${x.near ? ` <span class="muted">(${esc(x.near)})</span>` : ''}</div>`).join('')}</div></details>`).join('')}
+   ${(R.ai || []).some(a => a.mode === 'llm') ? `<details class="hl-doc"><summary class="small">참고 · AI가 문서의 글에서 칸 값을 찾은 결과</summary><div class="small" style="padding:6px 8px">${R.ai.map((a, i) => `<div>문서 ${i + 1}: ${a.hit}/${a.n}칸${a.miss.length ? ` — 다르게 적은 칸: ${a.miss.map(esc).join(', ')}` : ''}</div>`).join('')}<div class="muted">문서를 새로 만들 때 AI가 하는 일은 요청·자료에서 칸 값을 찾는 것입니다. 값이 달라도 문서의 고정 글과 모양은 바뀌지 않고, 만든 뒤 원본값 대조 검수가 한 번 더 봅니다.</div></div></details>` : ''}`;
 }
 // 등록하면 저장소에 무엇이 올라가는지(공개 저장소인지, 스킬 글에 회사 이름으로 보이는 글이 있는지) 미리 알려 준다
 function sbUploadNote(u) {
@@ -194,7 +253,8 @@ function sbUploadNote(u) {
     올라가는 것: ${u.files.map(esc).join(' · ')}<br>
     <b>올라가지 않는 것</b>: ${esc(u.not_uploaded)} — 이 PC에만 남습니다.
     ${u.names.length ? `<br><span style="color:var(--bad)">스킬 글에 회사 이름으로 보이는 글이 있습니다: <b>${u.names.map(esc).join(', ')}</b></span> — 실제 고객사라면 위 ③에서 <code>[고객사명]</code> 같은 칸으로 바꾼 뒤 다시 검증하세요.` : ''}
-    ${pub ? '<br><span class="muted">고정 문구와 작성 규칙은 스킬의 내용이라 그대로 올라갑니다. 실제 문서의 문장이 들어 있지 않은지 ③에서 확인하세요.</span>' : ''}</div>`;
+    ${u.clone ? `<br><span style="${pub ? 'color:var(--bad)' : ''}"><b>서식 파일에는 대표 문서의 고정된 글이 그대로 들어 있습니다.</b> ${pub ? '공개 저장소에는 가상 문서로 만든 서식만 올리세요. 실제 계약서·사내 양식은 사내(비공개) 저장소에서만 등록해야 합니다.' : ''}</span>`
+      : pub ? '<br><span class="muted">고정 문구와 작성 규칙은 스킬의 내용이라 그대로 올라갑니다. 실제 문서의 문장이 들어 있지 않은지 ③에서 확인하세요.</span>' : ''}</div>`;
 }
 // 검증 미통과 강제 등록: 미통과 항목을 보여 주고 사유를 받아, PR 본문 · 스킬 파일(verification) · SKILL.md에 남긴다
 function sbForce() {

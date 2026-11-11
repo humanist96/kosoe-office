@@ -104,7 +104,12 @@ def tags_of(sid):
 
 def file_text(rel):
     p = os.path.join(REPO, *rel.split('/'))
-    return open(p, encoding='utf-8').read() if os.path.isfile(p) else ''
+    if not os.path.isfile(p):
+        return ''
+    try:
+        return open(p, encoding='utf-8').read()
+    except UnicodeDecodeError:                      # 복제형 스킬의 서식(.hwp) 같은 파일
+        return f'(글이 아닌 파일입니다 — {os.path.getsize(p):,}바이트. 한글 서식 파일은 여기서 보여 주지 않습니다)'
 
 
 def tree(sid):
@@ -196,6 +201,29 @@ PII = [(re.compile(r'01[016-9]-?\d{3,4}-?\d{4}'), '휴대전화번호'), (re.com
        (re.compile(r'[\w.+-]+@[\w-]+\.[\w.]+'), '이메일'), (re.compile(r'(?<!\d)\d{3,6}-\d{2,6}-\d{2,8}(?!\d)'), '계좌번호')]
 
 
+def validate_fill(fill, lk):
+    """복제형 양식의 칸 정의(fill) 검사 → 오류 목록."""
+    if fill is None:
+        return []
+    if not isinstance(fill, dict):
+        return ['fill은 kind · engine · template · sections 를 가진 묶음이어야 함']
+    errs = []
+    if fill.get('kind') not in corp.FILL_KINDS:
+        errs.append('fill.kind는 ' + ' | '.join(corp.FILL_KINDS))
+    if fill.get('engine') not in lk['corp_skills']:
+        errs.append(f"fill.engine이 잠금 파일에 없는 전사 스킬: {fill.get('engine')}")
+    if not re.fullmatch(r'templates/[\w.\-]+\.(hwp|xlsx)', str(fill.get('template') or '')):
+        errs.append('fill.template은 templates/<파일>.hwp')
+    keys = [str(f.get('key') or '') for sec in fill.get('sections') or [] for f in sec.get('fields') or []]
+    if not keys:
+        errs.append('fill.sections에 칸이 없음')
+    if any(not k or re.search(r'[{}.\t\n]', k) for k in keys):
+        errs.append('칸 이름(key)에는 { } . 을 쓸 수 없음')
+    if len(set(keys)) != len(keys):
+        errs.append('같은 칸 이름(key)이 두 번 있음')
+    return errs
+
+
 def validate(s, skills=None):
     """오류 목록(비면 통과)."""
     errs = []
@@ -225,6 +253,7 @@ def validate(s, skills=None):
         if not f.get('outline'):
             errs.append(f"양식 {f.get('id')}: outline(장 구성) 없음")
         errs += [f"양식 {f.get('id')}: {e}" for e in checks.validate_style(f.get('style'))]
+        errs += [f"양식 {f.get('id')}: {e}" for e in validate_fill(f.get('fill'), lk)]
     errs += checks.validate_style(s.get('style'))
     v = s.get('verification')
     if v is not None and not (isinstance(v, dict) and v.get('status') in ('passed', 'forced')):
@@ -265,6 +294,19 @@ def form_rows():
         dept, team = (org + ['', ''])[:2]
         scope = 'me' if s.get('scope') == 'user' else ('corp' if s.get('share') == 'corp' else ('team' if team else 'dept'))
         for f in s.get('forms') or []:
+            if f.get('fill'):
+                # 복제형 스킬: 대표 문서를 서식으로 삼아 칸만 채운다. 서식 파일은 이 스킬 폴더에, 칸 채우기 부품은 전사 스킬(engine)에 있다
+                fill = {**f['fill'], 'name': f['fill'].get('name') or f['name']}
+                rows.append({'id': f"{sid}:{f['id']}", 'name': f['name'], 'fmt': corp.fill_fmt(fill), 'use': f.get('use', '문서'), 'scope': scope,
+                             'outline': f['outline'], 'desc': f.get('desc', s.get('name', '')), 'preset': '',
+                             'grade': f.get('grade', r['grade']), 'dept': dept, 'team': team, 'owner': s.get('owner', ''),
+                             'ver': s.get('version', ''), 'path': s['_path'], 'tag': (tags_of(sid) or [''])[0],
+                             'fields': [], 'rules': '', 'fixed': [],
+                             'skill': {'id': sid, 'name': s.get('name'), 'version': s.get('version'), 'chain': [l['id'] for l in r['levels']],
+                                       'corp': r['corp_ids'], 'checks': {'required': [], 'banned': []}, 'glossary': {'terms': {}, 'banned': []},
+                                       'fill': fill, 'fill_path': s['_path'], 'style': {'ending': 'any', 'date': 'any', 'max_len': 0},
+                                       'verification': s.get('verification')}})
+                continue
             fixed = [{'heading': b.get('heading', ''), 'text': b['text'], 'id': b.get('id', '')} for b in r['blocks'].values()
                      if not f.get('blocks') or b.get('id') in f['blocks']]
             rows.append({'id': f"{sid}:{f['id']}", 'name': f['name'], 'fmt': f['fmt'], 'use': f.get('use', '보고'), 'scope': scope,
@@ -301,6 +343,10 @@ def _commit_files(branch, files, message, requested_by):
                 os.remove(p)
             continue
         os.makedirs(os.path.dirname(p), exist_ok=True)
+        if isinstance(content, bytes):              # 복제형 스킬의 서식 파일(.hwp)
+            with open(p, 'wb') as f:
+                f.write(content)
+            continue
         with open(p, 'w', encoding='utf-8', newline='\n') as f:
             f.write(content)
     git('add', '-A', cwd=REPO)
@@ -368,9 +414,28 @@ def close(pr, reason):
 
 
 def files_at(tag, path):
-    """태그 시점의 스킬 폴더 내용 {상대경로: 텍스트}."""
-    names = git('ls-tree', '-r', '--name-only', tag, '--', path, cwd=REPO, check=False).splitlines()
-    return {n: git('show', f'{tag}:{n}', cwd=REPO, binary=True).decode('utf-8') for n in names if n}
+    """태그 시점의 스킬 폴더 내용 {상대경로: 텍스트}. 글이 아닌 파일(복제형 스킬의 서식 .hwp)은 bytes 그대로."""
+    names = git('-c', 'core.quotepath=false', 'ls-tree', '-r', '--name-only', tag, '--', path, cwd=REPO, check=False).splitlines()
+    out = {}
+    for n in names:
+        if n:
+            data = git('show', f'{tag}:{n}', cwd=REPO, binary=True)
+            try:
+                out[n] = data.decode('utf-8')
+            except UnicodeDecodeError:
+                out[n] = data
+    return out
+
+
+def fresh_file(rel, dest):
+    """스킬 저장소(main)의 파일을 git 객체에서 꺼내 dest 폴더에 쓴다 — 복제형 스킬의 서식.
+    작업 폴더의 파일을 직접 쓰지 않는다(사내 보호 도구가 디스크의 .hwp를 암호화해 두었을 수 있다)."""
+    data = git('show', f'main:{rel}', cwd=REPO, binary=True)
+    os.makedirs(dest, exist_ok=True)
+    p = os.path.join(dest, os.path.basename(rel))
+    with open(p, 'wb') as f:
+        f.write(data)
+    return p
 
 
 def bump(v, part='minor'):

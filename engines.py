@@ -101,14 +101,22 @@ def make_hwp_fill(bp, info, path, jd):
     """서식 채우기형 한글 스킬(목적별: 계약서·공문 등)로 만든다 — 설계도의 칸 값을 서식(.hwp)에 넣는다.
     info = 양식의 skill 정보({'corp': 전사 스킬 id, 'fill': form.yaml})."""
     import fillform
-    cid, form = info['corp'], info['fill']
+    cid, form = fill_cid(info), info['fill']
     values = fillform.to_values(bp, form)
     vp = os.path.join(jd, 'values.json')
     json.dump(values, open(vp, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
     # 서식은 매번 git 객체에서 새로 꺼낸다(사내 보호 도구가 캐시 파일을 암호화해도 영향 없음)
-    tpl = corp.fresh_copy(cid, [form['template']], os.path.join(jd, 'templates'))[0]
+    eng = form
+    if info.get('fill_path'):                      # 복제형 스킬: 서식은 스킬 저장소의 그 스킬 폴더에, 칸 채우기 부품은 전사 스킬(engine)에 있다
+        import skills
+        tpl = skills.fresh_file(f"{info['fill_path']}/{form['template']}", os.path.join(jd, 'templates'))
+        if not open(tpl, 'rb').read(8).startswith(b'\xd0\xcf\x11\xe0'):
+            raise RuntimeError('스킬의 서식 파일이 한글 형식이 아닙니다(암호화되었을 수 있음)')
+        eng = corp.form_of(cid)
+    else:
+        tpl = corp.fresh_copy(cid, [form['template']], os.path.join(jd, 'templates'))[0]
     root = corp.path(cid)
-    cp = os.pathsep.join(os.path.join(root, *p.split('/')) for p in (form.get('lib') or 'lib/hwplib-1.1.9.jar', form['jar']))
+    cp = os.pathsep.join(os.path.join(root, *p.split('/')) for p in (eng.get('lib') or 'lib/hwplib-1.1.9.jar', eng['jar']))
     r = subprocess.run(['java', '-Dfile.encoding=UTF-8', '-cp', cp, 'FillRenderer', tpl, vp, path], capture_output=True, timeout=60)
     out = r.stdout.decode('utf-8', 'replace') + r.stderr.decode('utf-8', 'replace')
     if r.returncode != 0 or not os.path.exists(path):
@@ -348,14 +356,23 @@ def make_pptx(bp, template, people, path):
     return len(prs.slides)
 
 
+def pptx_shapes(shapes):
+    """묶음 도형 안까지 내려가 낱개 도형을 차례로 낸다. 맨 위 도형만 보면 묶어서 그린 장표의 글을 대부분 놓친다."""
+    for sh in shapes:
+        if sh.shape_type == 6:                      # MSO_SHAPE_TYPE.GROUP
+            yield from pptx_shapes(sh.shapes)
+        else:
+            yield sh
+
+
 def pptx_text(path):
     from pptx import Presentation
     out = []
     for s in Presentation(path).slides:
-        for sh in s.shapes:
+        for sh in pptx_shapes(s.shapes):
             if sh.has_text_frame and sh.text_frame.text.strip():
                 out.append(sh.text_frame.text.strip())
-            if sh.has_table:
+            if getattr(sh, 'has_table', False):
                 for r in sh.table.rows:
                     out.append(' | '.join(c.text for c in r.cells))
     return out
@@ -563,6 +580,11 @@ def engine_of(fmt):
     return {'corp': cid, 'name': name, 'sha': (c.get('sha') or '')[:7]}
 
 
+def fill_cid(info):
+    """서식 채우기형 양식의 칸 채우기 부품이 든 전사 스킬 id. 전사 양식은 그 스킬 자신, 복제형 스킬은 fill.engine."""
+    return (info.get('fill') or {}).get('engine') or info['corp']
+
+
 def fill_engine(cid):
     c = corp.info(cid) or {}
     return {'corp': cid, 'name': f'{cid} · 서식 채우기', 'sha': (c.get('sha') or '')[:7]}
@@ -581,10 +603,10 @@ def make(fmt, bp, template, people, doc_id, ver, theme=None):
     if fmt == 'xlsx':                              # 엑셀은 서식 채우기형 전사 스킬(견적서 등)로만 만든다
         if not info.get('fill') or corp.fill_fmt(info['fill']) != 'xlsx':
             raise RuntimeError('엑셀은 엑셀 서식 채우기형 양식(견적서 등)에서만 만들 수 있습니다')
-        return path, make_xlsx_fill(bp, info, path, jd), int((time.time() - t0) * 1000), fill_engine(info['corp'])
+        return path, make_xlsx_fill(bp, info, path, jd), int((time.time() - t0) * 1000), fill_engine(fill_cid(info))
     engine = engine_of(fmt)
     if fmt == 'hwp' and info.get('fill'):          # 목적별 한글 스킬(서식 채우기형)
-        engine = fill_engine(info['corp'])
+        engine = fill_engine(fill_cid(info))
         warns = make_hwp_fill(bp, info, path, jd)
     elif fmt == 'hwp':
         warns = make_hwp(bp, template, people, path, jd)

@@ -52,10 +52,11 @@ def _pptx(path):
     from pptx import Presentation
     text, tables, heads = [], [], []
     for s in Presentation(path).slides:
+        shapes = list(engines.pptx_shapes(s.shapes))        # 묶음 도형 안의 글까지 읽는다
         if s.shapes.title is not None and s.shapes.title.text.strip():
             heads.append(_clean(s.shapes.title.text))
         else:
-            tf = [sh.text_frame.text.strip() for sh in s.shapes if sh.has_text_frame and sh.text_frame.text.strip()]
+            tf = [sh.text_frame.text.strip() for sh in shapes if sh.has_text_frame and sh.text_frame.text.strip()]
             for i, t in enumerate(tf):
                 m = re.match(r'^\d{2}\s+(\S.{1,24})$', t)
                 if m:
@@ -64,7 +65,7 @@ def _pptx(path):
                 if re.match(r'^\d{2}\.\s', t) and i + 1 < len(tf) and len(tf[i + 1]) <= 24:   # 셰브론 덱: 키커 다음이 장 제목
                     heads.append(tf[i + 1])
                     break
-        for sh in s.shapes:
+        for sh in shapes:
             if sh.has_text_frame and sh.text_frame.text.strip():
                 text.append(_clean(sh.text_frame.text))
             if getattr(sh, 'has_table', False) and sh.has_table:
@@ -115,13 +116,34 @@ def _pdf(path):
     return t, tables, [m.group(1) for l in t.splitlines() if (m := HEAD_RX.match(l))]
 
 
+def _hwp_tables(path, heads):
+    """한글 문서의 표를 행·열로 읽는다(맨 위 단계 표, 머리글 칸이 2개 이상인 것 — 표지·결재란처럼 배치용 표는 뺀다)."""
+    import clone
+    try:
+        code, out = engines._java('Inspect', path)
+        nodes = clone.parse(out.splitlines())
+    except Exception:
+        return []
+    tables, head, grids = [], '', iter(clone.tables_of(nodes))
+    for n in nodes:
+        if n['kind'] == 'p' and n['ind'] == 0:
+            t = clone.PUA.sub('', n['text']).strip()
+            if t in heads:
+                head = t
+        elif n['kind'] == 'table' and n['ind'] == 2:
+            g = next(grids, None)
+            if g and len(g) > 1 and sum(1 for c in g[0] if c) >= 2:
+                tables.append({'title': head or '표', 'cols': g[0], 'rows': g[1:40]})
+    return tables
+
+
 def _hwp(path):
     raw = engines.hwp_text(path)
     pua = re.compile('[\ue000-\uf8ff]')
     lines = [pua.sub('', l).strip() for l in raw]
     marked = [pua.sub('', l).strip() for l in raw if pua.match(l)]
     if marked:   # 코스콤 서식의 장 제목은 기호 글꼴 문자로 시작한다
-        return '\n'.join(lines), [], marked
+        return '\n'.join(lines), _hwp_tables(path, marked), marked
     heads = []
     for l in lines:
         m = HEAD_RX.match(l)
@@ -129,7 +151,7 @@ def _hwp(path):
             heads.append(m.group(1))
         elif len(l) <= 14 and not re.search(r'[:/()\d]', l) and l.strip():
             heads.append(l.strip())
-    return '\n'.join(lines), [], heads
+    return '\n'.join(lines), _hwp_tables(path, heads), heads
 
 
 def _csv(path):

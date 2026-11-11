@@ -3,6 +3,7 @@
 - 대표문서/: 스킬 빌더 시연용 '영업 제안서' 3건(PPT 2 · 한글 1). 목차·고정 문구가 같고 고객·숫자만 다르다.
 - 시연메모_고객세미나.txt: 0:00·1:50 장면용 메모(예산 120만원)
 - 계약서예시/: 보고서가 아닌 문서(계약서) 1건 — 스킬 빌더가 그 문서의 문체(서술형·날짜 형식·길이)를 기준으로 삼는지 확인용
+- 계약서_3건/: 같은 서식으로 쓴 한글 계약서 3건(값만 다름) — 복제형 스킬 시연용. 스킬 빌더가 세 문서를 맞대어 칸을 찾고 원본을 서식으로 삼는다
 모든 회사·사람·숫자는 가상이다.
 """
 import os
@@ -60,6 +61,32 @@ E증권 주식회사(이하 "갑"이라 한다)와 코쇠금융IT 주식회사(�
 """
 
 
+# 복제형 스킬 시연: 전사 계약서 스킬의 서식에 서로 다른 가상 값을 넣은 계약서 3건. 표는 한 행씩(구성이 같아야 줄 단위로 맞댈 수 있다)
+CONTRACTS = [
+    ('E증권', '서울특별시 영등포구 가상로 1', '홍 길 동', '고객확인 모니터링 고도화', '2019.03.15', '1', ('영업지원', '고객관리', '18,000', '')),
+    ('F자산운용', '서울특별시 중구 가상대로 25', '이 영 수', '펀드 기준가 검증 자동화', '2021.05.10', '2', ('운용지원', '펀드', '12,000', '가동 다음 달부터')),
+    ('G저축은행', '부산광역시 해운대구 가상해변로 7', '박 민 지', '여신 심사 보고서 자동 작성', '2023.11.01', '1', ('여신지원', '심사', '24,500', '')),
+]
+
+
+def contracts(out):
+    import clone
+    import corp
+    if not clone.ready():
+        print('계약서 3건 — 칸 채우기 전사 스킬이 잠금 파일에 없어 건너뜀')
+        return
+    kd = os.path.join(out, '계약서_3건')
+    os.makedirs(kd, exist_ok=True)
+    tmp = os.path.join(engines.JOBS, 'seed-contract')
+    tpl = corp.fresh_copy(clone.ENGINE, [corp.form_of(clone.ENGINE)['template']], tmp)[0]
+    for name, addr, ceo, work, base, years, (big, mid, fee, note) in CONTRACTS:
+        dst = os.path.join(kd, f'추가업무계약서_{name}(가상).hwp')
+        made, warns = clone.remake(tpl, {'고객사명': f'{name} 주식회사(가상)', '갑주소': addr, '갑대표이사': ceo, '을대표이사': '김 철 수', '추가업무명': work,
+                                         '기본계약체결일': base, '계약기간': f'추가업무 가동 이후 {years}년간', '계약일': '2026.    .    .', '합계': fee}, dst,
+                                   {'이용료': [{'대분류': big, '중분류': mid, '소분류': work, '회사기본': fee, '영업점당': '-', '이용량': '-', '비고': note}]})
+        print('계약서', dst, '' if made else '실패', warns)
+
+
 def bp_of(c):
     name, pain, goal, months, start, cost, _ = c
     return {'title': f'{name} 제안서', 'sections': [
@@ -96,6 +123,7 @@ def main(out):
     cp = os.path.join(cd, '전산서비스_추가업무_이용계약서_E증권(가상).txt')
     open(cp, 'w', encoding='utf-8').write(CONTRACT)
     print('계약서 예시', cp)
+    contracts(out)
     # 검수 시연: 사람이 고치다 예산을 잘못 바꾼 PPT(100만원)와 바로잡은 PPT(120만원)
     ev = lambda budget: {'title': '원장 클라우드 고객 세미나 계획', 'sections': [
         {'heading': '행사 개요', 'items': [{'label': '일시', 'text': '2026. 11. 20 14:00, 본사 대회의실', 'children': []},
