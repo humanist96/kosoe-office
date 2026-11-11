@@ -29,6 +29,56 @@ LOCKED_TOP = {'brand', 'fonts', 'logo', 'grade_label', 'hwp_base'}
 SEMVER = re.compile(r'^\d+\.\d+\.\d+$')
 
 
+class NoWriteAccess(GitError):
+    """스킬 저장소에 쓸 권한이 없다(읽기만 됨)."""
+
+
+_push = {'v': None, 't': 0}
+
+
+def can_push(fresh=False):
+    """gh 계정이 스킬 저장소에 쓸 수 있는가: True / False / None(확인 못 함). 5분에 한 번 조회한다.
+    clone·fetch 성공(STATE['mode'] == 'github')은 읽기 권한일 뿐이다."""
+    if STATE['mode'] != 'github':
+        return True                                  # 로컬 모드는 원격에 쓰지 않는다
+    if not have_gh():
+        return None
+    if fresh or _push['v'] is None or time.time() - _push['t'] > 300:
+        try:
+            out = gh('api', f'repos/{SLUG}', '--jq', '.permissions.push', check=False, timeout=30).strip()
+        except Exception:
+            out = ''
+        _push.update(v={'true': True, 'false': False}.get(out), t=time.time())   # 네트워크 오류 등은 None → 막지 않고 push 결과로 판단
+    return _push['v']
+
+
+def _need_push():
+    if can_push(fresh=True) is False:
+        who = identity().get('login') or '이 PC의 gh 계정'
+        raise NoWriteAccess(f'GitHub 계정 {who}은(는) 스킬 저장소 {SLUG}에 쓰기 권한이 없어 등록·승인할 수 없습니다. '
+                            '저장소 관리자에게 Write 권한을 요청하거나, .env의 KOSOE_SKILLS_REPO를 쓸 수 있는 저장소(예: 포크)로 '
+                            '바꾸고 서버를 다시 시작하세요.')
+
+
+def _norm_url(u):
+    u = u.strip().lower().rstrip('/')
+    return u[:-4] if u.endswith('.git') else u
+
+
+def _same_repo_or_move():
+    """복제본의 origin이 설정(KOSOE_SKILLS_REPO)과 다르면 옆으로 옮겨 두고 새로 받게 한다(지우지 않는다).
+    .env만 바꾸면 화면에는 새 저장소 이름이 나오는데 실제로는 예전 저장소를 당기고 그쪽에 쓰게 되는 것을 막는다."""
+    if CFG['skills_offline'] or not os.path.isdir(os.path.join(REPO, '.git')):
+        return
+    origin = _norm_url(git('remote', 'get-url', 'origin', cwd=REPO, check=False))
+    if not origin.startswith('https://github.com/'):     # 주소를 못 읽었거나 시험용 로컬 원격이면 건드리지 않는다
+        return
+    if origin != _norm_url(f'https://github.com/{SLUG}'):
+        moved = f"{REPO}.{time.strftime('%Y%m%d-%H%M%S')}"
+        os.replace(REPO, moved)
+        print(f'[skills] 스킬 저장소 설정이 바뀌어 예전 복제본을 옮겨 두었습니다: {moved}')
+
+
 # ───────────── 동기화 ─────────────
 def ensure(force=False, max_age=60):
     """로컬 복제본을 준비하고 원격 main을 당겨 온다(기본 60초에 한 번, force면 max_age초 이내 동기화는 건너뜀)."""
@@ -38,6 +88,7 @@ def ensure(force=False, max_age=60):
         if STATE['head'] and age < limit:
             return STATE
         try:
+            _same_repo_or_move()
             if not os.path.isdir(os.path.join(REPO, '.git')):
                 git_remote('clone', '-q', f'https://github.com/{SLUG}.git', REPO, timeout=300)
             elif not CFG['skills_offline']:
@@ -314,6 +365,7 @@ def open_pr(kind, s, files, requested_by, body, scope_label):
     """kind: new | update | revert. 돌려주는 값: {'branch','pr','url'}."""
     with _lock:
         ensure(force=True, max_age=20)
+        _need_push()                                   # 커밋 전에 막아 로컬 브랜치를 남기지 않는다
         branch = f"skill/{s['scope']}/{s['id']}/v{s['version']}"
         title = {'new': '스킬 등록', 'update': '스킬 변경', 'revert': '스킬 복구'}[kind] + f": {s['name']} v{s['version']}"
         try:
@@ -327,6 +379,10 @@ def open_pr(kind, s, files, requested_by, body, scope_label):
             url = gh('pr', 'create', '-R', SLUG, '--base', 'main', '--head', branch, '--label', scope_label,
                      '--title', title, '--body', body, timeout=120).strip().splitlines()[-1]
             return {'branch': branch, 'pr': int(url.rstrip('/').split('/')[-1]), 'url': url}
+        except Exception:                              # 실패한 시도의 로컬 브랜치를 치우고 그대로 던진다
+            git('checkout', '-q', '-f', 'main', cwd=REPO, check=False)
+            git('branch', '-D', branch, cwd=REPO, check=False)
+            raise
         finally:
             git('checkout', '-q', '-f', 'main', cwd=REPO, check=False)
 
@@ -347,6 +403,7 @@ def merge(pr, branch, sid, version, approved_by):
     tag = f'{sid}@v{version}'
     with _lock:
         if STATE['mode'] == 'github' and pr:
+            _need_push()
             gh('pr', 'merge', str(pr), '-R', SLUG, '--merge', '--delete-branch', timeout=180)
             ensure(force=True)
         else:

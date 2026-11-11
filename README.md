@@ -339,7 +339,7 @@ kosoe-office/
 ├─ checks.py           팩 규칙 검수 · 원본값 대조 · 고정 문구 보장
 ├─ fillform.py         서식 채우기형 스킬(한글 · 엑셀) — form.yaml(칸) ↔ 설계도 ↔ values.json · 칸 검수
 ├─ xlsx_view.py        엑셀 미리보기 — 결과 .xlsx의 인쇄 영역을 HTML 표로
-├─ extract.py          첨부 읽기 (xlsx · pptx · docx · pdf · hwp · html · csv · txt)
+├─ extract.py          첨부 읽기 (xlsx · pptx · docx · pdf · hwp · hwpx · html · csv · txt)
 ├─ doctor.py           설치 점검
 ├─ static/             화면 (index.html · views_skills.js · hwp_preview.js · ai_select.js · 서체 · Chart.js)
 │  └─ vendor/rhwp/     한글 미리보기용 HWP 렌더러 (rhwp 0.8.7, WASM)
@@ -373,6 +373,8 @@ python tests/e2e_inspect.py       # 검수 · 재검사
 python tests/e2e_fillform.py      # 목적별 한글 스킬(계약서): 칸 초안 → 수정 → 생성 → 검수 (앱 실행 중)
 python tests/e2e_xlsxfill.py      # 목적별 엑셀 스킬(견적서): 칸 초안 → 수정 → 생성 → 검수 → 미리보기 (앱 실행 중)
 python tests/e2e_style.py         # 문서 기준 문체 · 고정 문구의 칸 (앱 없이). --app 을 붙이면 계약서 예시로 분석 → 검증
+python tests/check_extract_hwpx.py        # hwpx 첨부 읽기 (앱 · 네트워크 · Java 없이, 가상 hwpx를 시험 안에서 만든다)
+python tests/check_skill_write_access.py  # 스킬 저장소 쓰기 권한이 없으면 커밋 전에 막는지 (KOSOE_HOME=시험 폴더, KOSOE_SKILLS_OFFLINE=1)
 python tests/e2e_provider.py nvidia       # AI를 바꿔 추천 → 초안 → 수정 → 세 형식 생성 (끝나면 되돌림). openrouter · --model 도 가능
 ```
 

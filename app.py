@@ -414,6 +414,10 @@ def upload():
     try:
         r = extract.read(path, name)
     except Exception as e:
+        try:
+            os.remove(path)                        # 읽지 못한 파일을 uploads에 남기지 않는다
+        except OSError:
+            pass
         return err(str(e))
     g.con.execute('insert into uploads values(?,?,?,?,?,?,?,?,?)', (uid, g.u['id'], name, path, r['kind'], r['text'],
                                                                   json.dumps(r['tables'], ensure_ascii=False), int(r['drm']), now()))
@@ -688,6 +692,33 @@ def e404(e):
 @app.errorhandler(423)
 def e423(e):
     return err('대외비 문서는 인터넷망에서 열 수 없습니다. 폐쇄망으로 전환해 주세요.', 423)
+
+
+# 처리하지 못한 예외도 늘 JSON으로 — HTML 500이 나가면 화면은 「서버 응답 오류 (500)」만 보여 주고 진짜 이유를 가린다.
+# Flask는 예외 클래스의 상속 순서에서 가장 가까운 처리기를 고른다: NoWriteAccess → GitError → Exception.
+@app.errorhandler(skills.NoWriteAccess)
+def e_nowrite(e):
+    return err(str(e), 403)
+
+
+@app.errorhandler(skills.GitError)
+def e_git(e):
+    app.logger.exception('git/gh 실패')
+    return err(f'스킬 저장소 작업 실패 — {str(e)[-240:]}', 502)
+
+
+@app.errorhandler(413)
+def e413(e):
+    return err(f"파일이 너무 큽니다 (최대 {app.config['MAX_CONTENT_LENGTH'] // 1048576}MB)", 413)
+
+
+@app.errorhandler(Exception)
+def e500(e):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):            # 처리기가 따로 없는 HTTP 오류는 기본 응답 그대로
+        return e
+    app.logger.exception('처리하지 못한 오류')  # 서버 창에는 전체 traceback이 남는다
+    return err(f'서버 오류: {type(e).__name__} — {str(e)[:200]}', 500)
 
 
 @app.get('/api/docs/<did>')
@@ -992,7 +1023,10 @@ def _open_skill_request(kind, s, files, u, report=None, note=''):
 
 
 def _public_detail(c, rep):
-    """PR 본문·스킬 파일에 적을 기준 설명. 숫자 기준은 대표 문서의 값이 드러나지 않게 건수로 적는다."""
+    """PR 본문·스킬 파일에 적을 기준 설명. 숫자 기준은 대표 문서의 값이 드러나지 않게 건수로 적는다.
+    문체 기준은 화면에만 걸린 문장을 보여 주고(detail), 저장소에는 기준 이름만 올린다(public_detail)."""
+    if c.get('id') == 'grammar':
+        return c.get('public_detail', c.get('detail', ''))
     if c.get('id') != 'numbers':
         return c.get('detail', '')
     lost = sum(len(t['with']['lost']) for t in rep.get('tasks') or [])
@@ -1139,7 +1173,7 @@ def skillgen_analyze():
     out, meta = llm.extract(docs, ai_ctx(), prose)
     kinds = [d['kind'] for d in docs]
     fmt = 'ppt' if 'pptx' in kinds else 'web' if 'html' in kinds else 'hwp'
-    if re.search(r'PPT|발표|제안서|덱', req_text, re.I) and 'hwp' not in kinds:
+    if re.search(r'PPT|발표|제안서|덱', req_text, re.I) and not {'hwp', 'hwpx'} & set(kinds):   # hwpx도 한글 문서
         fmt = 'ppt'
     outline = []
     for h in out.get('outline') or []:
@@ -1213,7 +1247,9 @@ def _bp_score(bp, form, blocks, memo, allowed='', fixed=()):
         return any(abs(a + c - x['value']) < 1e-9 for i, a in enumerate(same) for c in same[i + 1:])
     new = [x['raw'] for x in got if x['unit'] not in ('일', '회') and not any(abs(x['value'] - v['value']) < 1e-9 for v in src_vals) and not derived(x)]
     gram = [c for c in engines.check(bp, (), form.get('style'), fixed) if c['id'] in ('date', 'long', 'end') and not c['ok']]   # 이 양식의 문체 기준
-    return {'struct': round(struct, 3), 'fixed': fixed_ok, 'lost': lost[:5], 'new': new[:5], 'grammar': [c['name'] for c in gram]}
+    # grammar(기준 이름)는 스킬 저장소의 evals에 올라간다 — 문장을 섞지 않는다. 걸린 문장은 화면용 grammar_detail에만 둔다.
+    return {'struct': round(struct, 3), 'fixed': fixed_ok, 'lost': lost[:5], 'new': new[:5], 'grammar': [c['name'] for c in gram],
+            'grammar_detail': [c['name'] + (f" — {c['detail']}" if c.get('detail') else '') for c in gram]}
 
 
 def _criteria_pass(sc):
@@ -1319,7 +1355,8 @@ def skillgen_evaluate(jid):
          'detail': '; '.join(f"빠짐 {t['with']['lost']} 새 숫자 {t['with']['new']}" for t in tasks if t['with']['lost'] or t['with']['new'])},
         {'id': 'grammar', 'name': '보고 문법(3줄·명사형·날짜)' if checks.is_default_style(form.get('style')) else
             f"문체 — 대표 문서 기준({checks.style_label(form.get('style'))})", 'pass': bool(tasks) and all(not t['with']['grammar'] for t in tasks),
-         'detail': '; '.join(', '.join(t['with']['grammar']) for t in tasks if t['with']['grammar'])},
+         'detail': '; '.join(', '.join(t['with'].get('grammar_detail') or t['with']['grammar']) for t in tasks if t['with']['grammar']),
+         'public_detail': '; '.join(', '.join(t['with']['grammar']) for t in tasks if t['with']['grammar'])},
         {'id': 'security', 'name': '보안(실명·연락처·계좌 없음)', 'pass': not pii, 'detail': '; '.join(pii)},
         {'id': 'compare', 'name': '효과 비교(스킬 사용 > 미사용)', 'pass': wsc > osc, 'detail': f'사용 {wsc}/{full} · 미사용 {osc}/{full}'},
         {'id': 'human', 'name': f'사람 확인(시범 작성 {need}건 👍)', 'pass': False, 'detail': '아래에서 확인', 'human': need},
@@ -1371,6 +1408,7 @@ def _skill_files(draft, report, analysis):
 def _upload_notice(draft):
     """등록하면 저장소에 무엇이 올라가는지 — 화면에 미리 보여 준다(저장소가 공개인지, 스킬 글에 회사 이름으로 보이는 글이 있는지)."""
     return {'visibility': skills.visibility(), 'repo': skills.SLUG, 'names': checks.company_names(draft),
+            'writable': skills.can_push(),         # False면 화면이 등록 버튼을 막고 이유를 알린다(None = 확인 못 함)
             'files': ['kosoe-skill.yaml (구성 · 고정 문구 · 규칙)', 'SKILL.md', 'evals/case-N/case.yaml (기대 구성 · 채점 결과)'],
             'not_uploaded': '대표 문서 파일과 검증 과제 메모(대표 문서에서 뽑은 줄)'}
 

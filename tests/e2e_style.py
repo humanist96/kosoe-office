@@ -100,6 +100,49 @@ def unit():
     expect('채점 결과는 건수로', "'lost': 2" in str(checks.public_score(sc)) and '빠진 숫자 2건 · 새 숫자 1건' in A._report_md(rep))
     expect('스킬 글의 회사 이름으로 보이는 글을 알려 줌', checks.company_names(draft) == ['Z증권'], str(checks.company_names(draft)))
 
+    print('⑥ 기안문의 결재 요청 문장 — 칸 뒤 조사 · 서술형 한 줄 허용 · 걸린 문장 보이기(가상 문장)')
+    t = '2. 위 근거에 의거, [대상 및 추진사항]을 다음과 같이 추진하고자 합니다'
+    expect('칸 뒤 조사가 받침에 맞춰 바뀌어도 고정 문구(을→를)', checks.is_fixed_item('2. 위 근거에 의거, 가상 회사 A의 임대차 계약 해지를 다음과 같이 추진하고자 합니다', [t]))
+    expect('받침 있는 말(을)도 그대로 인정', checks.is_fixed_item('2. 위 근거에 의거, 가상 회사 A의 임대차 계약을 다음과 같이 추진하고자 합니다', [t]))
+    expect('칸 밖 동사가 바뀌면 고정 문구가 아님', not checks.is_fixed_item('2. 위 근거에 의거, 가상 회사 A의 임대차 계약 해지를 다음과 같이 시행하고자 합니다', [t]))
+    expect('[기관]으로 ↔ 로', checks.is_fixed_item('가상 기관 B로 통보함', ['[기관]으로 통보함']) and checks.is_fixed_item('가상 법인으로 통보함', ['[기관]으로 통보함']))
+    expect('조사 뒤에 한글이 이어지면([칸]이다) 조사로 보지 않음', not checks.is_fixed_item('가상 사업가다', ['[사업]이다']) and checks.is_fixed_item('가상 사업이다', ['[사업]이다']))
+    bp3 = {'title': 't', 'sections': [{'heading': '본문', 'table': None, 'items': [
+        {'label': '', 'text': '2. 위 근거에 의거, 가상 회사 A의 임대차 계약 해지를 다음과 같이 추진하고자 합니다', 'children': []}]}]}
+    fx = checks.enforce_fixed(bp3, [{'id': 'b1', 'heading': '본문', 'text': t}])
+    fx = fx[0] if isinstance(fx, tuple) else fx
+    n_req = sum(1 for s in fx['sections'] for it in s['items'] if '추진하고자 합니다' in it['text'])
+    expect('고정 문구 틀을 한 번 더 덧붙이지 않음(결재 요청 문장 1개)', n_req == 1, f'{n_req}개')
+    expect('판정 정규식이 측정과 같은 범위(바랍니다 · 드립니다도 서술형)', all(engines.BAD_END.search(x) for x in ('결재하여 주시기 바랍니다.', '보고드립니다', '추진하고자 합니다'))
+           and not any(engines.BAD_END.search(x) for x in ('교체 필요', '협조 요청함', '계약 해지 예정')))
+    items = [{'label': '', 'text': f'가상 항목 {i} 추진', 'children': []} for i in range(10)] + \
+            [{'label': '', 'text': '가상 사업을 다음과 같이 시행하고자 합니다', 'children': []}]
+    bp4 = {'title': 't', 'sections': [{'heading': '본문', 'items': items, 'table': None}]}
+    st4 = {'ending': 'noun', 'date': 'Y.MM.DD', 'max_len': 90}
+    e1 = next(c for c in engines.check(bp4, (), st4) if c['id'] == 'end')
+    e0 = next(c for c in engines.check(bp4, (), None) if c['id'] == 'end')
+    expect('대표 문서 기준 명사형: 11줄 중 서술형 1줄은 허용', e1['ok'] and not e1['fix'], str(e1))
+    expect('코스콤 보고 문법 기본값은 한 줄도 허용하지 않음', not e0['ok'] and e0['fix'])
+    expect('미통과 설명에 걸린 문장이 보임', '시행하고자 합니다' in e0['detail'], e0['detail'])
+    f1, _ = engines.autofix(bp4, lambda xs: (xs, None), (), st4)
+    f0, _ = engines.autofix(bp4, lambda xs: (xs, None), (), None)
+    expect('자동 수정: 허용치 안의 서술형은 그대로, 기본 문법에서는 명사형으로', f1['sections'][0]['items'][-1]['text'].endswith('합니다') and f0['sections'][0]['items'][-1]['text'].endswith('시행하고자 함'),
+           f1['sections'][0]['items'][-1]['text'] + ' / ' + f0['sections'][0]['items'][-1]['text'])
+    b5 = {'title': 't', 'sections': [{'heading': '본문', 'table': None, 'items': [{'label': '', 'text': '검토하여 주시기 바랍니다', 'children': []}, {'label': '', 'text': '결과를 보고드립니다.', 'children': []}]}]}
+    f5, _ = engines.autofix(b5, lambda xs: (xs, None), (), None)
+    expect('자동 수정: 바랍니다 → 바람, 드립니다 → 드림', [it['text'] for it in f5['sections'][0]['items']] == ['검토하여 주시기 바람', '결과를 보고드림'], str([it['text'] for it in f5['sections'][0]['items']]))
+    form5 = {'outline': ['본문'], 'style': st4}
+    items6 = [{'label': '', 'text': f'가상 항목 {i} 추진', 'children': []} for i in range(3)] + [{'label': '', 'text': '가상 건을 다음과 같이 시행하고자 합니다', 'children': []},
+                                                                                              {'label': '', 'text': '검토 결과를 알려 드립니다', 'children': []}]
+    bp6 = {'title': 't', 'sections': [{'heading': '본문', 'items': items6, 'table': None}]}
+    sc6 = A._bp_score(bp6, form5, [], '') if hasattr(A, '_bp_score') else None
+    if sc6 is not None:
+        expect('채점: 기준 이름(grammar)에는 문장이 없고 화면용(grammar_detail)에만 있음', sc6['grammar'] and all('하고자' not in g for g in sc6['grammar'])
+               and any('시행하고자 합니다' in g for g in sc6['grammar_detail']), str(sc6))
+        expect('저장소에 올리는 채점 결과에는 걸린 문장이 없음', '하고자' not in str(checks.public_score(sc6)))
+        crit = {'id': 'grammar', 'name': '문체', 'pass': False, 'detail': '; '.join(sc6['grammar_detail']), 'public_detail': '; '.join(sc6['grammar'])}
+        expect('PR 본문 · 스킬 파일에는 기준 이름만', '하고자' not in A._public_detail(crit, {}) and '하고자' not in A._report_md({'criteria': [crit], 'tasks': []}))
+
 
 def app(force):
     from e2e_skillgen import call, BASE, op

@@ -83,6 +83,7 @@ DATE_RX = re.compile(r'(20\d\d)(?:[-./]\s*(\d{1,2})[-./]\s*(\d{1,2})(?!\d)|년\s
 SENT_END = re.compile(r'[가-힣]다[.。]?[”"’\')\]]*$')            # ~한다. ~합니다.
 POLITE_END = re.compile(r'니다[.。]?[”"’\')\]]*$')
 NOUN_END = re.compile(r'(함|임|됨|했음|하였음|되었음|있음|없음)[.]?$')   # 개조식
+NOUN_TOLERANCE = 0.1     # 서술형이 이 비율 이하면 명사형 문서로 본다 — 측정(measure_style)과 판정(engines.check)이 같은 숫자를 쓴다
 
 
 def norm_style(style):
@@ -163,7 +164,7 @@ def measure_style(texts):
         ratio = len(sent) / len(lines)
         if ratio >= 0.35:
             st['ending'] = 'polite' if sum(1 for l in sent if POLITE_END.search(l)) * 2 >= len(sent) else 'plain'
-        elif ratio > 0.1:
+        elif ratio > NOUN_TOLERANCE:
             st['ending'] = 'any'
         basis.append(f'문장 {len(lines)}개 중 서술형(~다) {ratio * 100:.0f}%')
         over = sum(1 for l in lines if len(l) > 90) / len(lines)
@@ -202,11 +203,24 @@ def validate_style(style):
 SLOT_RX = re.compile(r'\[[^\[\]\n]{1,23}[^\[\]\n\d]\]')
 
 
+JOSA = [('을', '를'), ('이', '가'), ('은', '는'), ('과', '와'), ('으로', '로')]
+
+
+def _josa_rx(p):
+    """칸 바로 뒤 글의 첫 조사를 짝 조사와 함께 받는다: '을 다음과' → '(?:을|를) 다음과'.
+    칸에 받침 없는 말이 오면 AI는 문법대로 '를'을 쓴다 — 그래도 같은 고정 문구로 본다. 조사 뒤에 한글이 이어지면([칸]이다) 조사가 아니다."""
+    for a, b in JOSA:
+        for x in (a, b):
+            if p.startswith(x) and (len(p) == len(x) or not re.match('[가-힣]', p[len(x)])):
+                return f'(?:{re.escape(a)}|{re.escape(b)})' + re.escape(p[len(x):])
+    return re.escape(p)
+
+
 def _fixed_rx(t):
     parts = SLOT_RX.split(t)
     if len(parts) == 1:
         return None
-    return re.compile(r'.{1,80}?'.join(re.escape(p) for p in parts), re.S)
+    return re.compile(r'.{1,80}?'.join([re.escape(parts[0])] + [_josa_rx(p) for p in parts[1:]]), re.S)
 
 
 def fixed_present(t, text):
