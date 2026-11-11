@@ -346,6 +346,7 @@ async function demoPick(onPick, filter) {
   }
   const fs = d.files.filter(f => !filter || filter(f.name));
   modal('📂 시연 자료 고르기 <span class="small muted">seed/out — 모두 가상</span>', `
+    ${fs.length ? '' : '<p class="small">이 시연 자료가 아직 없습니다(예전에 만든 자료 폴더에는 없는 종류입니다). 아래 <b>자료 다시 만들기</b>를 누른 뒤 다시 열어 주세요.</p>'}
     ${fs.map((f, i) => `<label class="out-f row" style="cursor:pointer"><input type="checkbox" value="${esc(f.name)}" ${filter && !f.name.includes('수정본') ? 'checked' : ''}><span class="grow">${esc(f.name)}</span><span class="small muted">${kb(f.size)}</span></label>`).join('')}
     <div class="row" style="margin-top:10px"><button class="btn o" id="dpGo">첨부</button><button class="btn ghost" onclick="demoMake()">자료 다시 만들기</button></div>`);
   $('#dpGo').onclick = async () => {

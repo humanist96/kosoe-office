@@ -22,6 +22,10 @@ sys.dont_write_bytecode = True
 for s in (sys.stdout, sys.stderr):
     s.reconfigure(encoding='utf-8', errors='replace')
 
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+import make_local_home  # noqa: E402
+
+make_local_home.ensure(os.environ['KOSOE_HOME'])     # 시험용 데이터 폴더가 없으면 만든다(실제 ~/.kosoe 에서 복사 — GitHub와 분리)
 for f in ('kosoe.db',):                      # 시험마다 새 DB
     p = os.path.join(HOME, f)
     if os.path.exists(p):
@@ -162,6 +166,27 @@ if cp['llm']['mode'] == 'llm':
     expect('새 고객의 값이 들어감', 'G카드' in ntext)
 res_eng = (g['doc']['files'][0].get('resolution') or {})
 expect('문서 정보에 스킬 버전과 칸 채우기 부품이 남음', any(x.startswith(d['id'] + '@') for x in res_eng.get('skills') or []) and clone.ENGINE in (res_eng.get('corp') or {}), str(res_eng)[:200])
+
+print('⑥-2 팀 범위 — 스킬 폴더가 한글 경로(skills/org/본부/팀)이고 팀장 승인을 거친다')
+j5 = call('/api/skillgen/analyze', {'upload_ids': [u['id'] for u in ups], 'request': '영업 제안서 서식 팀 스킬 만들어줘', 'scope': 'team'})['job']
+d5 = j5['draft']
+expect('팀 범위 복제형 초안', j5['analysis'].get('mode') == 'clone' and d5['scope'] == 'org' and d5.get('org') == '금융영업본부/금융영업1팀', str(d5.get('org')))
+r5 = call(f"/api/skillgen/{j5['id']}/evaluate", {'draft': d5})['report']
+need5 = next(x['human'] for x in r5['criteria'] if x['id'] == 'human')
+q5 = call(f"/api/skillgen/{j5['id']}/submit", {'thumbs': need5})['request']
+expect('팀장 승인을 기다림', q5['stage'] == 'lead', q5['stage'])
+call('/api/login', {'uid': 'u2'})
+q5 = call(f"/api/requests/{q5['id']}/decide", {'approve': True, 'note': '서식 확인'})['request']
+expect('팀장 승인 뒤 병합 · 태그', q5['stage'] == 'done', str([h['act'] for h in q5['history']]))
+call('/api/login', {'uid': 'u1'})
+sp5 = f"skills/org/금융영업본부/금융영업1팀/{d5['id']}"
+expect('한글 경로의 서식 파일도 저장소에 한글 형식 그대로', gitutil.git('show', f'main:{sp5}/templates/form.hwp', cwd=origin, binary=True).startswith(clone.OLE))
+t5 = next((x for x in call('/api/templates?sync=1')['templates'] if x['id'] == f"{d5['id']}:main"), None)
+expect('팀 양식 카드로 보임', bool(t5) and t5['scope'] == 'team' and bool(t5['skill_info'].get('fill')), str(t5 and t5['scope']))
+cp5 = call('/api/compose', {'template_id': t5['id'], 'request': 'H생명(가상) 제안서를 만들어줘. 착수일은 2027. 6. 1'})['compose']
+g5 = call(f"/api/compose/{cp5['id']}/generate", {'fmts': ['hwp']})
+new5 = clone.read(engines.out_path(g5['doc']['id'], g5['doc']['ver'], 'hwp'))
+expect('팀 스킬로 만든 문서의 구성이 대표 문서와 같음', [n['sig'] for n in new5] == [n['sig'] for n in base])
 
 print('⑦ 복제형으로 만들 수 없는 경우 — 조립형으로 넘어가고 이유를 알린다')
 if '--no-ai' in sys.argv:

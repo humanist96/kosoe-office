@@ -14,6 +14,11 @@ sys.dont_write_bytecode = True
 for s in (sys.stdout, sys.stderr):
     s.reconfigure(encoding='utf-8', errors='replace')
 
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+import make_local_home  # noqa: E402
+
+make_local_home.ensure(os.environ['KOSOE_HOME'])     # 시험용 데이터 폴더가 없으면 만든다(실제 ~/.kosoe 에서 복사 — GitHub와 분리)
+
 import clone  # noqa: E402
 import corp  # noqa: E402
 import engines  # noqa: E402

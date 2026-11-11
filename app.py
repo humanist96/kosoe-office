@@ -1128,6 +1128,8 @@ def _parent_skill(u, scope, allsk):
         cands += [s for s in allsk.values() if s.get('scope') == 'org' and s.get('org') == team_path]
     if scope in ('me', 'team'):
         cands += [s for s in allsk.values() if s.get('scope') == 'org' and s.get('org') == u['dept']]
+    # 복제형 스킬(서식 + 칸)은 물려줄 고정 문구·규칙이 없는 끝단 스킬이다 — 상위 스킬로 삼지 않는다
+    cands = [s for s in cands if not (s.get('forms') and all(f.get('fill') for f in s['forms']))]
     return cands[0] if cands else None
 
 
@@ -1371,7 +1373,8 @@ def skillgen_analyze():
     outline = []
     for h in out.get('outline') or []:
         h = re.sub(r'\s*\(.*?\)\s*$', '', str(h)).strip()
-        if h and len(h) <= (28 if prose else 16) and not re.search(r'표지|목차|결재', h) and h not in outline:
+        # 표지·목차·결재란과 발표 자료의 맺음 장(감사합니다 등)은 엔진이 따로 만든다 — 장 구성에 넣지 않는다
+        if h and len(h) <= (28 if prose else 16) and not re.search(r'표지|목차|결재|^감사|^마무리$|^맺음|thank\s*you|q\s*&\s*a', h, re.I) and h not in outline:
             outline.append(h)
     outline = outline[:14 if prose else 8] or ['개요', '주요 내용', '향후 계획']
     base, sim = _nearest_corp_form(outline, fmt)
@@ -1440,7 +1443,14 @@ def _bp_score(bp, form, blocks, memo, allowed='', fixed=()):
         same = [v['value'] for v in src_vals if v['unit'] == x['unit']]
         if abs(sum(same) - x['value']) < 1e-9:
             return True
-        return any(abs(sum(c) - x['value']) < 1e-9 for n in (2, 3, 4) for c in itertools.combinations(same[:12], n))
+        if any(abs(sum(c) - x['value']) < 1e-9 for n in (2, 3, 4) for c in itertools.combinations(same[:12], n)):
+            return True
+        # 표의 칸은 단위가 머리글에만 있다('비용(백만원)' 아래 80 · 390 · 110). 메모에 적힌 숫자 그대로이거나 그 몇 개의 합이면 지어낸 숫자가 아니다
+        m = re.match(r'[\d,]+(?:\.\d+)?', x['raw'])
+        num = float(m.group(0).replace(',', '')) if m else None
+        return num is not None and (any(abs(b - num) < 1e-9 for b in bare)
+                                    or any(abs(sum(c) - num) < 1e-9 for n in (2, 3, 4) for c in itertools.combinations(bare, n)))
+    bare = [float(n.replace(',', '')) for n in dict.fromkeys(re.findall(r'(?<![\d.,])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d,]*\.?\d)', memo))][-24:]      # 표는 메모 끝에 있다 — 뒤에서부터 24개까지
     new = [x['raw'] for x in got if x['unit'] not in ('일', '회') and not any(abs(x['value'] - v['value']) < 1e-9 for v in src_vals) and not derived(x)]
     gram = [c for c in engines.check(bp, (), form.get('style'), fixed) if c['id'] in ('date', 'long', 'end') and not c['ok']]   # 이 양식의 문체 기준
     # grammar(기준 이름)는 스킬 저장소의 evals에 올라간다 — 문장을 섞지 않는다. 걸린 문장은 화면용 grammar_detail에만 둔다.
@@ -1516,8 +1526,14 @@ def skillgen_evaluate(jid):
     def memo_of(f):
         fixed_texts = [x['text'] for x in blocks]
         lines = [l.strip() for l in (f['text'] or '').splitlines() if l.strip() and not any(ft in l for ft in fixed_texts)]
-        keep = [l for l in lines if checks.NUM_RX.search(l) or len(l) > 12][:14]
-        return '다음 메모로 같은 종류의 문서를 써 줘.\n' + '\n'.join(keep)
+        # 읽은 표가 있으면 표의 칸은 낱개 줄 대신 표 모양으로 준다 — '1개월'처럼 무엇의 숫자인지 모를 줄만 남으면 과제가 성립하지 않는다
+        tbs = J(f.get('tables'), [])[:2]
+        cells = {str(c).strip() for t in tbs for r in [t['cols']] + t['rows'] for c in r if str(c).strip()}
+        # 숫자와 단위만 있는 줄(그려서 만든 표의 칸 등)은 무엇의 숫자인지 알 수 없으므로 과제에 넣지 않는다
+        orphan = re.compile(r'[\d,.]+\s*' + checks.UNIT)
+        keep = [l for l in lines if l not in cells and not orphan.fullmatch(l) and (checks.NUM_RX.search(l) or len(l) > 12)][:14]
+        tables = ''.join(f"\n표 — {t.get('title', '')}\n" + ' | '.join(t['cols']) + '\n' + '\n'.join(' | '.join(r) for r in t['rows'][:10]) for t in tbs)
+        return '다음 메모로 같은 종류의 문서를 써 줘.\n' + '\n'.join(keep) + tables
 
     results = [None] * len(files)
 
@@ -1647,6 +1663,7 @@ def _upload_notice(draft, template=None):
         except Exception:
             pass
         return {'visibility': skills.visibility(), 'repo': skills.SLUG, 'names': names[:8], 'clone': True,
+                'writable': skills.can_push(),     # False면 화면이 등록 버튼을 막고 이유를 알린다(None = 확인 못 함)
                 'files': ['kosoe-skill.yaml (칸 정의)', 'SKILL.md', 'templates/form.hwp (대표 문서에서 칸 값만 비운 서식 — 고정된 글과 모양이 그대로 들어 있음)',
                           'evals/roundtrip.yaml (재현도 점수)'],
                 'not_uploaded': '대표 문서 파일 · 칸에 들어 있던 값 · 바꿈표'}
