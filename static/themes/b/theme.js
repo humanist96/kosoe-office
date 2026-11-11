@@ -47,7 +47,7 @@ async function vNew() {
   $('#main').innerHTML = `
   <div class="page-h"><div><h2>무엇을 만들까요?</h2><p>하고 싶은 말을 적고 자료를 붙이면, 맞는 양식(스킬)을 골라 초안을 만듭니다.</p></div>
     <span class="chip ${ME.net === 'internet' ? 'o' : 'n'}">${ME.net === 'internet' ? '🌐 인터넷망 — 대외비 템플릿 제외 · 마스킹 적용' : '🔒 폐쇄망 — 모든 등급 사용 가능'}</span></div>
-  <div class="new-banner"><strong>정확한 문서, 일관된 기준으로.</strong><span>코스콤의 문서 기준과 업무 맥락을 반영해 초안을 구성합니다.</span></div>
+  <div class="new-banner"><i class="ride" aria-hidden="true"><i class="k"></i></i><strong>정확한 문서, 일관된 기준으로.</strong><span>코스콤의 문서 기준과 업무 맥락을 반영해 초안을 구성합니다.</span></div>
   <div class="ask">
     <textarea id="req" placeholder="예) 3분기 금융영업1팀 실적 결과 보고서 만들어줘. 첨부한 엑셀 숫자를 성과 표에 넣고, 향후 계획은 B증권 제안 중심으로."></textarea>
     <div class="row sp wrap" style="margin-top:8px">
