@@ -60,7 +60,7 @@ def wrap(text, width, fs, max_lines=99):
     if len(lines) > max_lines:
         lines = lines[:max_lines]
         lines[-1] = lines[-1].rstrip()[:-1] + '…'
-    return lines
+    return lines or ['']          # 빈 글(표의 빈 칸 등)도 빈 줄 하나 — 첫 줄([0])을 쓰는 곳이 넘어지지 않게
 
 
 def text(x, y, s, fs=16, fill=INK, bold=False, anchor='start'):
@@ -281,3 +281,8 @@ def make(bp, template, people, path, job_dir, theme=None):
     if r.returncode != 0 or not os.path.exists(path):
         raise RuntimeError('PPT 변환 실패(ppt-master): ' + (r.stdout + r.stderr).decode('utf-8', 'replace')[-400:])
     return len(pages)
+
+
+if __name__ == '__main__':           # 자체검사: 표의 빈 칸 → 경량 렌더러로 넘어가던 IndexError
+    assert wrap('', 100, 16, 1) == [''] and wrap('가 나', 100, 16) == ['가 나']
+    print('ppt_chevron selftest OK')
