@@ -186,6 +186,19 @@ pre.code{background:#0f1b33;color:#d6e2ff;padding:14px;border-radius:10px;font:1
 /* 파일 끌어 놓기 강조 — 테마 CSS가 기본 CSS를 대신하므로 늘 실리는 이 블록에 둔다 */
 .dz-on{outline:2px dashed var(--o,#F06E1E);outline-offset:4px}
 .dz-on .drop{border-color:var(--o,#F06E1E);color:var(--o,#F06E1E)}
+/* 양식 카드 샘플 창 · 크게 보기(#zoom) — 테마 CSS에는 없는 규칙이라 늘 실리는 이 블록에 둔다 */
+.smp{display:grid;gap:10px}
+.smp .big{display:block;max-width:100%;max-height:calc(90vh - 330px);margin:0 auto;border:1px solid var(--g,#d9dde3);border-radius:10px;background:#fff;cursor:zoom-in}
+.smp .thumbs{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.smp .thumbs img{height:78px;border:2px solid var(--g,#d9dde3);border-radius:6px;cursor:pointer;background:#fff;flex:none}
+.smp .thumbs img.on{border-color:var(--o,#F06E1E)}
+#zoom{position:fixed;inset:0;z-index:65;background:rgba(10,20,40,.9);display:flex;flex-direction:column}
+#zoom .zt{display:flex;gap:8px;align-items:center;justify-content:flex-end;padding:10px 16px;color:#fff;font-size:13px}
+#zoom .zt .btn,#zoom .zt .x{background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.3);border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit;box-shadow:none}
+#zoom .zb{flex:1;overflow:auto;display:grid;place-items:center;padding:0 16px 16px}
+#zoom .zb img{display:block;max-width:100%;max-height:calc(100vh - 70px);background:#fff;border-radius:4px;cursor:zoom-in}
+#zoom.fitw .zb{place-items:start center}
+#zoom.fitw .zb img{max-height:none;width:min(100%,1600px);cursor:zoom-out}
 /* 화면 테마 고르기 — 어느 테마에서도 보이도록 테마 CSS와 따로 둔다 */
 .theme-pick{display:inline-flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap}
 .theme-pick svg{width:14px;height:14px;flex:none}
@@ -239,6 +252,10 @@ pre.code{background:#0f1b33;color:#d6e2ff;padding:14px;border-radius:10px;font:1
   <main id="main"></main>
 </div>
 <div id="modal" class="hide"><div class="mbox"><div class="mh"><h3 id="mt"></h3><button class="x" onclick="closeModal()">✕</button></div><div class="mb" id="mb"></div></div></div>
+<div id="zoom" class="hide" onclick="if (event.target.id === 'zoom' || event.target.classList.contains('zb')) closeZoom()">
+  <div class="zt"><span id="zn"></span><button class="btn sm zp" onclick="zoomStep(-1)">◀ 이전</button><button class="btn sm zp" onclick="zoomStep(1)">다음 ▶</button>
+    <span class="small">그림을 누르면 폭 맞춤 ↔ 화면 맞춤 · ←/→ 쪽 넘기기 · Esc 닫기</span><button class="x" onclick="closeZoom()">✕</button></div>
+  <div class="zb"><img id="zimg" alt="샘플 크게 보기" onclick="$('#zoom').classList.toggle('fitw')"></div></div>
 <div id="toast"></div>
 <script src="/static/chart.umd.min.js"></script>
 <script src="/static/views_skills.js"></script>
@@ -268,6 +285,22 @@ function toast(t, bad) { const e = document.createElement('div'); e.textContent 
 function modal(title, html, wide) { $('#mt').innerHTML = title; $('#mb').innerHTML = html; $('#modal .mbox').classList.toggle('wide', !!wide); $('#modal').classList.remove('hide'); }
 function closeModal() { $('#modal').classList.add('hide'); $('#mb').innerHTML = ''; }
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
+// 샘플 크게 보기(#zoom): 그림을 누르면 화면 맞춤 ↔ 폭 맞춤, ←/→ 쪽 넘기기, Esc · ✕ · 바깥 누르기로 닫기(샘플 창은 그대로 남는다)
+let ZM = {urls: [], i: 0};
+function openZoom(urls, i) { ZM = {urls, i: i || 0}; $('#zoom').classList.remove('hide', 'fitw'); zoomShow(); }
+function zoomShow() {
+  $('#zimg').src = ZM.urls[ZM.i]; $('#zn').textContent = ZM.urls.length > 1 ? `${ZM.i + 1} / ${ZM.urls.length}쪽` : '';
+  document.querySelectorAll('#zoom .zp').forEach(b => b.classList.toggle('hide', ZM.urls.length < 2));
+}
+function zoomStep(d) { if (ZM.urls.length > 1) { ZM.i = (ZM.i + d + ZM.urls.length) % ZM.urls.length; zoomShow(); } }
+function closeZoom() { $('#zoom').classList.add('hide'); $('#zimg').removeAttribute('src'); }
+// Esc: 위에 뜬 것부터 하나씩 닫는다(크게 보기 → 창). 한글 조합 중이거나 작업 중(busy)이면 그대로 둔다
+document.addEventListener('keydown', e => {
+  if (e.isComposing || document.querySelector('.busy')) return;
+  const z = !$('#zoom').classList.contains('hide');
+  if (e.key === 'Escape') { if (z) closeZoom(); else if (!$('#modal').classList.contains('hide')) closeModal(); }
+  else if (z && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); zoomStep(e.key === 'ArrowLeft' ? -1 : 1); }
+});
 async function busy(text, fn) {
   const b = document.createElement('div'); b.className = 'busy';
   const ai = /AI|초안|추천|추출|양식|고치는|템플릿을 찾/.test(text) && ME?.ai?.connected;
@@ -377,18 +410,36 @@ async function vNew() {
   renderAtt(); if (PICK) selTpl(PICK);
 }
 function tplCard(t) {
-  return `<div class="card tpl ${t.usable ? '' : 'dis'}" id="t-${t.id}" onclick="${t.usable ? `selTpl('${t.id}')` : `toast('${esc(t.blocked || '사용 권한이 없습니다')}',true)`}" title="${esc(t.blocked)}">
+  return `<div class="card tpl ${t.usable ? '' : 'dis'}" id="t-${t.id}" onclick="${t.usable ? `pickTpl('${t.id}')` : `toast('${esc(t.blocked || '사용 권한이 없습니다')}',true)`}" title="${esc(t.blocked)}">
     <div class="row sp"><div class="row">${fmtTag(t.fmt)}<span class="chip ${t.scope === 'corp' ? '' : 'o'}">${SCOPE[t.scope]}${t.team ? ' · ' + esc(t.team) : t.dept ? ' · ' + esc(t.dept) : ''}</span></div>${gradeTag(t.grade)}</div>
     <b style="font-size:15px">${esc(t.name)}</b>
     <div class="small muted">${esc(t.desc)}</div>
     <div class="ol">${t.outline.map(esc).join(' › ')}</div>
-    <div class="row sp small muted"><span>🧩 ${esc(t.skill)}</span><span>사용 ${t.uses}회</span></div>
+    <div class="row sp small muted"><span>🧩 ${esc(t.skill)}</span><span>${t.samples?.files.length ? `🖼 샘플 ${t.samples.files.length}장 · ` : ''}사용 ${t.uses}회</span></div>
     ${t.blocked ? `<div class="small" style="color:var(--bad)">⛔ ${esc(t.blocked)}</div>` : ''}</div>`;
 }
 function selTpl(id) {
   PICK = id; document.querySelectorAll('.tpl').forEach(e => e.classList.toggle('sel', e.id === 't-' + id));
   const g = $('#go'); if (g) { g.disabled = false; const t = TPLS.find(x => x.id === id); g.textContent = `${t ? t.name : ''} 초안 만들기 →`; }
 }
+// 양식 카드 샘플: 카드를 누르면 고르고, 샘플 그림이 있는 양식은 샘플 창을 띄운다(그림이 없으면 고르기만 — 빈 창을 띄우지 않는다)
+function pickTpl(id) { selTpl(id); if (TPLS.find(x => x.id === id)?.samples?.files.length) showSample(id); }
+function showSample(id) {
+  const t = TPLS.find(x => x.id === id), s = t?.samples;
+  if (!t) return;
+  const url = f => `/api/samples/${encodeURIComponent(s.src)}/${encodeURIComponent(f)}`;
+  SMP = (s?.files || []).map(url);
+  const foot = `<p class="small muted" style="margin:10px 0 0">${esc(t.desc)} · 구성 ${t.outline.map(esc).join(' › ')}</p>
+    <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px"><button class="btn ghost" onclick="closeModal()">닫기</button><button class="btn o" onclick="useTpl()">이 양식으로 시작 →</button></div>`;
+  modal(`${fmtTag(t.fmt)} ${esc(t.name)} <span class="small muted">샘플${s?.from ? ` · 비슷한 전사 양식 「${esc(s.from)}」의 모양` : ''}</span>`,
+    !s?.files.length ? `<div class="empty"><img src="/static/kosoe.webp" alt=""><p>이 양식은 아직 샘플 그림이 없습니다.</p></div>${foot}` : `
+    <div class="smp"><img class="big" id="smp-big" src="${SMP[0]}" data-i="0" alt="샘플 1쪽" title="눌러서 크게 보기" onclick="openZoom(SMP, +this.dataset.i)">
+      ${SMP.length > 1 ? `<div class="thumbs">${SMP.map((u, i) => `<img src="${u}" class="${i ? '' : 'on'}" alt="샘플 ${i + 1}" onclick="smpGo(this, ${i})">`).join('')}</div>` : ''}</div>
+    <p class="small muted" style="margin:8px 0 0">🔍 그림을 누르면 크게 볼 수 있습니다. 가상의 표본 내용으로 만든 예시이고, 실제 문서는 요청과 첨부 자료로 채워집니다.</p>${foot}`, t.fmt !== 'hwp');
+}
+let SMP = [];
+function smpGo(img, i) { const b = $('#smp-big'); b.src = img.src; b.dataset.i = i; img.parentNode.querySelectorAll('img').forEach(x => x.classList.toggle('on', x === img)); }
+function useTpl() { closeModal(); $('#main').scrollTo({top: 0, behavior: 'smooth'}); setTimeout(() => $('#req')?.focus(), 250); }
 // ───────────── 첨부: 파일 선택 · 끌어 놓기 ─────────────
 const ACCEPT = '.xlsx,.xlsm,.pptx,.docx,.pdf,.hwp,.hwpx,.html,.htm,.csv,.txt,.md,.pia';
 async function eachFile(files, cb) {               // 한 파일이 실패해도 나머지는 올린다(실패 사유는 api()가 이미 토스트로 보여 줌)

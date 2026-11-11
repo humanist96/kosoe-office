@@ -400,7 +400,10 @@ def _commit_files(branch, files, message, requested_by):
             continue
         with open(p, 'w', encoding='utf-8', newline='\n') as f:
             f.write(content)
-    git('add', '-A', cwd=REPO)
+    # 요청한 파일만 담는다 — 작업 폴더에 남아 있던 다른 파일(지우지 못한 옛 파일 등)이 PR에 쓸려 들어가지 않게
+    gone = [r for r, c in files.items() if c is None]
+    tracked = set(git('ls-files', '--', *gone, cwd=REPO).splitlines()) if gone else set()
+    git('add', '-A', '--', *[r for r, c in files.items() if c is not None or r in tracked], cwd=REPO)
     git('-c', f"user.name={who['name']}", '-c', f"user.email={who['email']}", 'commit', '-q', '-m',
         f'{message}\n\nRequested-by: {requested_by}', cwd=REPO)
     if STATE['mode'] == 'github':
@@ -408,12 +411,12 @@ def _commit_files(branch, files, message, requested_by):
 
 
 def open_pr(kind, s, files, requested_by, body, scope_label):
-    """kind: new | update | revert. 돌려주는 값: {'branch','pr','url'}."""
+    """kind: new | update | revert | promote. 돌려주는 값: {'branch','pr','url'}."""
     with _lock:
         ensure(force=True, max_age=20)
         _need_push()                                   # 커밋 전에 막아 로컬 브랜치를 남기지 않는다
         branch = f"skill/{s['scope']}/{s['id']}/v{s['version']}"
-        title = {'new': '스킬 등록', 'update': '스킬 변경', 'revert': '스킬 복구'}[kind] + f": {s['name']} v{s['version']}"
+        title = {'new': '스킬 등록', 'update': '스킬 변경', 'revert': '스킬 복구', 'promote': '검수 요청(범위 올리기)'}[kind] + f": {s['name']} v{s['version']}"
         try:
             _commit_files(branch, files, f"skill({s['scope']}): {s['id']} v{s['version']} — {title}", requested_by)
             if STATE['mode'] != 'github' or not have_gh():

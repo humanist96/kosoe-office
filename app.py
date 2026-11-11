@@ -50,9 +50,11 @@ UP = os.path.join(DATA, 'uploads')
 os.makedirs(UP, exist_ok=True)
 STATIC = os.path.join(core.ROOT, 'static')
 MANUAL_MIN = {'hwp': 90, 'ppt': 180, 'web': 150, 'xlsx': 40}   # 손으로 만들 때 걸리는 시간(분, 가정)
-SCOPE_STAGES = {'me': ['ci'], 'team': ['lead'], 'dept': ['dept'], 'corp': ['corp']}
+SCOPE_STAGES = {'me': ['ci'], 'team': ['lead'], 'dept': ['dept'], 'corp': ['dept', 'corp']}   # 전사 팩: 부서 관리자 검수 → 전사 관리자 승인
 STAGE_NAME = {'ci': '자동 검사', 'lead': '팀장 승인', 'dept': '부서 관리자 승인', 'corp': '전사 관리자 승인', 'done': '등록 완료', 'rejected': '반려'}
-KIND_NAME = {'new': '스킬 등록', 'update': '스킬 변경', 'revert': '스킬 복구'}
+KIND_NAME = {'new': '스킬 등록', 'update': '스킬 변경', 'revert': '스킬 복구', 'promote': '검수 요청(범위 올리기)'}
+SCOPE_NAME = {'me': '개인', 'team': '팀', 'dept': '부서', 'corp': '전사'}
+SCOPE_RANK = {'me': 0, 'team': 1, 'dept': 2, 'corp': 3}
 
 
 # ───────────── 공통 ─────────────
@@ -185,14 +187,42 @@ def tpl_view(t, u):
     return o
 
 
+SAMPLE_EXT = ('.webp', '.png', '.jpg', '.jpeg', '.svg')
+
+
+def _sample_dir(t):
+    """양식 카드의 샘플 그림 폴더(스킬 저장소): 전사 양식 = registry/samples/<id>/, 스킬 양식 = 그 스킬 폴더의 samples/<양식 id>/."""
+    if t['path'].startswith('registry/'):      # corp.forms.yaml 의 전사 양식 · corp.lock.yaml 의 서식 채우기형 전사 스킬
+        return os.path.join(skills.REPO, 'registry', 'samples', t['id'])
+    return os.path.join(skills.REPO, *t['path'].split('/'), 'samples', t['id'].split(':', 1)[-1])
+
+
+def _sample_files(d):
+    return sorted(f for f in os.listdir(d) if f.lower().endswith(SAMPLE_EXT)) if os.path.isdir(d) else []
+
+
+def samples_of(t, corp_forms):
+    """카드를 누르면 보일 샘플: 자기 샘플 → 같은 형식·서식(preset)의 전사 샘플 → 같은 형식의 다른 전사 샘플.
+    돌려주는 값 {'src': 그림을 가진 양식 id, 'from': 빌려 온 전사 양식 이름(자기 것이면 ''), 'files': [...]}"""
+    fs = _sample_files(_sample_dir(t))
+    if fs or (J(t['skill'], {}) or {}).get('fill'):      # 서식 채우기형은 모양이 정해져 있어 다른 양식의 샘플을 빌리지 않는다
+        return {'src': t['id'], 'from': '', 'files': fs}
+    for c in sorted((c for c in corp_forms if c['fmt'] == t['fmt'] and c['id'] != t['id']), key=lambda c: c['preset'] != t['preset']):
+        fs = _sample_files(_sample_dir(c))
+        if fs:
+            return {'src': c['id'], 'from': c['name'], 'files': fs}
+    return {'src': t['id'], 'from': '', 'files': []}
+
+
+def _visible(t, u):
+    return (t['scope'] == 'corp' or u['role'] == 'corpAdmin' or (t['scope'] == 'dept' and t['dept'] == u['dept'])
+            or (t['scope'] == 'team' and t['team'] == u['team']) or (t['scope'] == 'me' and t['owner'] == u['id']))
+
+
 def visible_templates(u):
-    out = []
-    for t in rows(g.con, 'select * from templates order by uses desc, scope desc'):
-        vis = (t['scope'] == 'corp' or u['role'] == 'corpAdmin' or (t['scope'] == 'dept' and t['dept'] == u['dept'])
-               or (t['scope'] == 'team' and t['team'] == u['team']) or (t['scope'] == 'me' and t['owner'] == u['id']))
-        if vis:
-            out.append(tpl_view(t, u))
-    return out
+    allt = rows(g.con, 'select * from templates order by uses desc, scope desc')
+    corp_forms = [t for t in allt if t['path'] == 'registry/corp.forms.yaml']
+    return [{**tpl_view(t, u), 'samples': samples_of(t, corp_forms)} for t in allt if _visible(t, u)]
 
 
 def template_for_render(t):
@@ -389,6 +419,19 @@ def health():
 @login_required
 def templates():
     return ok(templates=visible_templates(g.u))
+
+
+@app.get('/api/samples/<tid>/<name>')
+@login_required
+def template_sample(tid, name):
+    """양식 카드 샘플 그림(스킬 저장소의 그 양식 샘플 폴더 안 파일만). 그 양식을 볼 수 있는 사람과, 그 스킬의 검수 요청을 지금 승인할 사람이 본다."""
+    t = row(g.con, 'select * from templates where id=?', tid)
+    pend = _open_request(tid.split(':', 1)[0]) if t and ':' in tid else None
+    if not t or not (_visible(t, g.u) or (pend and _approver_ok(pend, g.u))) or name not in _sample_files(_sample_dir(t)):
+        abort(404)
+    r = send_from_directory(_sample_dir(t), name)
+    r.headers['Cache-Control'] = 'max-age=3600'
+    return r
 
 
 @app.post('/api/route')
@@ -938,8 +981,63 @@ def _can_change(s, u):
 def _scope_of(s):
     if s.get('scope') == 'user':
         return 'me'
+    if s.get('share') == 'corp':              # 전사 공개 팩은 바꿀 때도 전사 관리자까지 승인한다
+        return 'corp'
     org = (s.get('org') or '').split('/')
     return 'team' if len(org) > 1 else 'dept'
+
+
+def _open_request(sid):
+    """그 스킬에 아직 끝나지 않은 등록 · 변경 · 복구 · 검수 요청(같은 폴더를 고치는 PR이 둘이면 뒤엣것이 충돌한다)."""
+    return row(g.con, "select * from requests where json_extract(note, '$.sid')=? and stage not in ('done', 'rejected')", sid)
+
+
+def promote_plan(s, target, u, allsk):
+    """개인 · 팀 스킬을 부서 팩(skills/org/<본부>/<id>) 또는 전사 팩(같은 자리 + share: corp)으로 올린 스킬 내용과 오류 목록.
+    id는 그대로 둔다 — 버전 태그(<id>@v…)와 이미 만든 문서의 양식 id(<id>:<양식>)가 이어진다."""
+    if target not in ('dept', 'corp'):
+        return None, ['올릴 범위는 dept(부서 팩) 또는 corp(전사 팩)입니다']
+    cur = _scope_of(s)
+    if SCOPE_RANK[cur] >= SCOPE_RANK[target]:
+        return None, [f'이미 {SCOPE_NAME[cur]} 범위입니다']
+    errs = []
+    for e in map(str, s.get('extends') or []):
+        p = allsk.get(e.split(':', 1)[1].split('@')[0]) if e.startswith('skill:') else None
+        if p and SCOPE_RANK[_scope_of(p)] < SCOPE_RANK[target]:      # 좁은 팩을 상속하면 그 팀 규칙이 섞이고, 그 팩이 바뀌면 이 팩도 승인 없이 바뀐다
+            errs.append(f"상위 팩 {p['id']}({SCOPE_NAME[_scope_of(p)]})을 상속합니다 — 그 팩의 고정 문구 · 규칙을 이 팩으로 옮기고 상속에서 뺀 뒤 다시 요청하세요")
+    # 개인 스킬은 만든 사람의 본부 · 이름으로 올린다(전사 관리자가 대신 요청해도 그 사람 본부에 남는다)
+    me = (core.get_user(g.con, s.get('owner')) or u) if s.get('scope') == 'user' else u
+    org = (s.get('org') or '').split('/')[0] if s.get('scope') == 'org' else me['dept']
+    head = {'id': s['id'], 'name': s['name'], 'scope': 'org', 'org': org, **({'share': 'corp'} if target == 'corp' else {}),
+            'owner': me['name'], 'version': skills.bump(s['version'], 'minor')}
+    new = {**head, **{k: v for k, v in s.items() if not k.startswith('_') and k not in head and k != 'share'}}
+    return new, errs + skills.validate(new, allsk)
+
+
+def promote_files(s, new):
+    """옛 폴더 파일은 지우고(None) 새 폴더에 같은 이름으로. 내용은 작업 폴더가 아니라 git(main)에서 꺼낸다 —
+    샘플 그림 · 복제형 서식(.hwp) 같은 바이너리는 바이트 그대로이고, 사내 보호 도구가 디스크의 .hwp를 암호화해 두었어도 원본이 옮겨진다."""
+    old, dst = s['_path'], skills.skill_dir(new)
+    files = {}
+    for rel, content in skills.files_at('main', old).items():
+        files[rel] = None
+        files[dst + rel[len(old):]] = content
+    files[f'{dst}/kosoe-skill.yaml'] = skills.dump_skill(new)
+    md = files.get(f'{dst}/SKILL.md')
+    if isinstance(md, str):
+        files[f'{dst}/SKILL.md'] = (md.rstrip() + f"\n\n- 공개 범위: {SCOPE_NAME[_scope_of(new)]}({new['org']}) — "
+                                    f"{core.today_kr()} {SCOPE_NAME[_scope_of(s)]} 스킬에서 올림(v{s['version']} → v{new['version']})\n")
+    return files
+
+
+def _promote_targets(s, u, allsk):
+    """스킬 화면의 「검수 요청」 단추: 올릴 수 있는 범위마다 승인 단계와 막는 이유."""
+    out = []
+    for t in ('dept', 'corp'):
+        if SCOPE_RANK[_scope_of(s)] < SCOPE_RANK[t]:
+            _, errs = promote_plan(s, t, u, allsk)
+            out.append({'target': t, 'name': SCOPE_NAME[t] + ' 팩', 'stages': [STAGE_NAME[x] for x in SCOPE_STAGES[t]], 'why': '; '.join(errs)})
+    return out
 
 
 def skill_view(sid, s, allsk, u, full=False):
@@ -952,7 +1050,8 @@ def skill_view(sid, s, allsk, u, full=False):
     if full:
         o.update(blocks=s.get('blocks') or [], resolved_blocks=list(r['blocks'].values()), glossary=r['glossary'], checks=r['checks'], rules=r['rules'],
                  own_rules=s.get('rules') or [], approval_line=r['approval_line'], history=skills.history(sid), files=skills.tree(sid),
-                 yaml=skills.file_text(s['_path'] + '/kosoe-skill.yaml'), skill_md=skills.file_text(s['_path'] + '/SKILL.md'))
+                 yaml=skills.file_text(s['_path'] + '/kosoe-skill.yaml'), skill_md=skills.file_text(s['_path'] + '/SKILL.md'),
+                 promote=_promote_targets(s, u, allsk) if o['can_change'] else [], pending=bool(_open_request(sid)))
     return o
 
 
@@ -1010,7 +1109,8 @@ def _open_skill_request(kind, s, files, u, report=None, note=''):
                   (rid, s['name'], fmts[0], scope, u['id'], org[0] if s.get('scope') == 'org' else u['dept'],
                    (org[1] if len(org) > 1 else '') if s.get('scope') == 'org' else u['team'], SCOPE_STAGES[scope][0],
                    json.dumps([f['name'] for f in s.get('forms') or []], ensure_ascii=False), '[]', '', '[]', pr['branch'], pr['pr'], pr['url'],
-                   skills.skill_dir(s), json.dumps({'kind': kind, 'sid': s['id'], 'version': s['version'], 'report': report}, ensure_ascii=False),
+                   skills.skill_dir(s), json.dumps({'kind': kind, 'sid': s['id'], 'version': s['version'], 'report': report,
+                                                    'verification': s.get('verification')}, ensure_ascii=False),
                    json.dumps(hist, ensure_ascii=False), now(), now()))
     log(u['name'], f"{KIND_NAME[kind]} 요청 — {s['name']} v{s['version']} · " + (f"PR #{pr['pr']}" if pr['pr'] else '로컬 브랜치 ' + pr['branch']))
     r = row(g.con, 'select * from requests where id=?', rid)
@@ -1068,6 +1168,8 @@ def skill_change(sid):
         abort(404)
     if not _can_change(s, g.u):
         return err('이 스킬의 변경을 요청할 권한이 없습니다', 403)
+    if _open_request(sid):
+        return err('이 스킬에 처리 중인 요청이 있습니다 — 끝난 뒤 다시 요청하세요', 409)
     b = request.json or {}
     new = {k: v for k, v in s.items() if not k.startswith('_')}
     if 'blocks' in b:
@@ -1096,6 +1198,8 @@ def skill_revert(sid):
         abort(404)
     if not _can_change(s, g.u):
         return err('이 스킬의 복구를 요청할 권한이 없습니다', 403)
+    if _open_request(sid):
+        return err('이 스킬에 처리 중인 요청이 있습니다 — 끝난 뒤 다시 요청하세요', 409)
     tag = (request.json or {}).get('tag', '')
     if tag not in skills.tags_of(sid):
         return err('없는 태그입니다')
@@ -1111,6 +1215,29 @@ def skill_revert(sid):
         if f not in files:
             files[f] = None
     r = _open_skill_request('revert', {**od, '_path': s['_path']}, files, g.u, note=f'{tag} 내용으로 복구')
+    return ok(request=req_view(r, g.u))
+
+
+@app.post('/api/skills/<sid>/promote')
+@login_required
+def skill_promote(sid):
+    """개인 · 팀 스킬 → 부서 팩 · 전사 팩 검수 요청: 폴더를 새 범위 자리로 옮기는 PR을 열고, 그 범위의 승인 단계를 거쳐 병합한다."""
+    skills.ensure(force=True, max_age=20)
+    allsk = skills.all_skills()
+    s = allsk.get(sid)
+    if not s:
+        abort(404)
+    if not _can_change(s, g.u):
+        return err('이 스킬의 검수 요청을 낼 권한이 없습니다', 403)
+    if _open_request(sid):
+        return err('이 스킬에 처리 중인 요청이 있습니다 — 끝난 뒤 다시 요청하세요', 409)
+    b = request.json or {}
+    new, errs = promote_plan(s, b.get('target'), g.u, allsk)
+    if errs:
+        return err('; '.join(errs)[:400])
+    dst = skills.skill_dir(new)
+    note = f"{s['_path']} → {dst}" + (f" · {str(b['note']).strip()[:200]}" if (b.get('note') or '').strip() else '')
+    r = _open_skill_request('promote', {**new, '_path': dst}, promote_files(s, new), g.u, note=note)
     return ok(request=req_view(r, g.u))
 
 
@@ -1131,6 +1258,32 @@ def _parent_skill(u, scope, allsk):
     # 복제형 스킬(서식 + 칸)은 물려줄 고정 문구·규칙이 없는 끝단 스킬이다 — 상위 스킬로 삼지 않는다
     cands = [s for s in cands if not (s.get('forms') and all(f.get('fill') for f in s['forms']))]
     return cands[0] if cands else None
+
+
+# ② 분석 뒤처리: AI가 뽑은 장 · 규칙을 자르지 말고 거른다
+NUM_HEAD = re.compile(r'^\s*(?:\d{1,2}|[가나다라마바사아자차카타파하]|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ])\s*[.)]\s*(?!\d)')      # 「1. 」「가. 」「Ⅱ. 」 장 번호 — 엔진이 장 머리를 붙인다
+FORMAT_RULE = re.compile(r'맑은 고딕|바탕체|돋움|\d+\s*pt\b|포인트|굵게|글꼴|글씨 크기|들여\s*쓰|(?:왼쪽|오른쪽|가운데|좌측|우측|양쪽)\s*정렬|빈 줄|줄 간격|여백|자동생성|기호 순서')
+PRIVACY_RULE = re.compile(r'가린다|가려|마스킹|실명|연락처|개인정보')
+
+
+def norm_heading(h, prose=False):
+    """AI가 뽑은 장 후보 한 줄 → 장 이름. 끝의 설명 괄호를 떼고, 개조식 보고서는 장 번호도 뗀다(엔진이 장 머리 □ · 01을 붙인다 —
+    남겨 두면 「□ 1. 추진 개요」가 된다). 서술형 문서(계약서 · 규정)의 조 · 항 번호는 그 문서의 내용이라 둔다."""
+    h = re.sub(r'\s*\(.*?\)\s*$', '', str(h)).strip()
+    return h if prose else NUM_HEAD.sub('', h).strip()
+
+
+def split_rules(rules):
+    """AI 규칙 → (내용 규칙, 뺀 규칙과 이유). 글꼴 · 들여쓰기 · 빈 줄은 엔진(서식)이, 개인정보는 검사(validate)가 맡는다.
+    앞에서 몇 개만 남기면 AI가 서식 설명을 먼저 썼을 때 내용 규칙이 잘린다 — 먼저 거르고 20개까지 둔다."""
+    keep, drop = [], []
+    for r in rules or []:
+        r = str(r).strip()
+        if not r or r in keep:
+            continue
+        why = '서식(엔진이 맡음)' if FORMAT_RULE.search(r) else '개인정보(검사가 맡음)' if PRIVACY_RULE.search(r) else ''
+        (drop.append({'rule': r, 'why': why}) if why else keep.append(r))
+    return keep[:20], drop
 
 
 def _nearest_corp_form(outline, fmt):
@@ -1372,7 +1525,7 @@ def skillgen_analyze():
         fmt = 'ppt'
     outline = []
     for h in out.get('outline') or []:
-        h = re.sub(r'\s*\(.*?\)\s*$', '', str(h)).strip()
+        h = norm_heading(h, prose)
         # 표지·목차·결재란과 발표 자료의 맺음 장(감사합니다 등)은 엔진이 따로 만든다 — 장 구성에 넣지 않는다
         if h and len(h) <= (28 if prose else 16) and not re.search(r'표지|목차|결재|^감사|^마무리$|^맺음|thank\s*you|q\s*&\s*a', h, re.I) and h not in outline:
             outline.append(h)
@@ -1392,6 +1545,7 @@ def skillgen_analyze():
             h = str(x.get('heading') or '')
             blocks.append({'id': f'b{len(blocks) + 1}', 'heading': h if h in outline else next((o for o in outline if o in h or h in o), h), 'text': t})
     blocks = blocks[:12 if prose else 6]
+    rules, dropped = split_rules(out.get('rules'))
     corp_ext = {'hwp': 'corp:koscom-hwp-report', 'ppt': 'corp:koscom-doc-pack#ppt-master', 'web': 'corp:koscom-webslide'}[fmt]
     extends = ([f"skill:{parent['id']}"] if parent else []) + [corp_ext, 'corp:kosoe-illustrations']
     draft = {'id': sid, 'name': name[:40], 'scope': 'user' if scope == 'me' else 'org', 'version': '1.0.0', 'grade': 'i', 'extends': extends,
@@ -1399,7 +1553,7 @@ def skillgen_analyze():
                         'desc': f"{len(docs)}건의 대표 문서로 만든 {FMT[fmt]} 양식", **({'preset': base['preset']} if base and base.get('preset') else {}),
                         'blocks': [x['id'] for x in blocks]}],
              'blocks': blocks, 'glossary': {'terms': {}, 'banned': []}, 'checks': {'required': [], 'banned': []},
-             'rules': [r for r in out.get('rules') or [] if r][:6]}
+             'rules': rules}
     if prose:                                   # 보고 문법과 다를 때만 스킬에 적는다(없으면 전사 보고 문법을 그대로 상속)
         draft['forms'][0]['style'] = {k: style[k] for k in ('ending', 'date', 'max_len')}
         draft['forms'][0]['use'] = '문서'
@@ -1412,7 +1566,7 @@ def skillgen_analyze():
     analysis = {'mode': 'compose', 'clone': {'ok': False, 'reason': why} if why else None,
                 'base': {'id': base['id'], 'name': base['name'], 'similarity': sim} if base else None,
                 'parent': {'id': parent['id'], 'name': parent['name'], 'version': parent['version']} if parent else None,
-                'highlights': _highlights(docs, blocks, outline), 'fields': out.get('fields') or [], 'meta': meta,
+                'highlights': _highlights(docs, blocks, outline), 'fields': out.get('fields') or [], 'meta': meta, 'dropped_rules': dropped,
                 'style': {**style, 'label': checks.style_label(style), 'default': not prose},
                 'docs': [{'name': d['name'], 'heads': d['heads'], 'kind': d['kind']} for d in docs]}
     g.con.execute('insert into skill_jobs values(?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -1728,6 +1882,10 @@ def skillgen_submit(jid):
 # ───────────── 등록 요청 · 승인 ─────────────
 def _approver_ok(req, u):
     st = req['stage']
+    if st == 'lead' and not core.lead_of(g.con, req['team']):      # 그 팀에 팀장이 없으면 부서 관리자가 대신 승인한다
+        st = 'dept'
+    if st == 'dept' and not row(g.con, "select 1 from users where dept=? and role='deptAdmin'", req['dept']):   # 부서 관리자가 없으면 전사 관리자가
+        st = 'corp'
     return ((st == 'lead' and u['role'] == 'lead' and u['team'] == req['team']) or
             (st == 'dept' and u['role'] == 'deptAdmin' and u['dept'] == req['dept']) or
             (st == 'corp' and u['role'] == 'corpAdmin'))
@@ -1744,6 +1902,8 @@ def req_view(r, u):
     o['requester_name'] = f"{me['name']} {me['title']}" if me else r['requester']
     o['note'] = J(r['note'], {})
     o['kind_name'] = KIND_NAME.get(o['note'].get('kind'), '등록')
+    if o['note'].get('kind') == 'promote' and r['stage'] not in ('done', 'rejected'):     # 승인권자가 카드에서 볼 샘플 그림(아직 옮기기 전 자리)
+        o['samples'] = {t['id']: _sample_files(_sample_dir(t)) for t in rows(g.con, 'select * from templates where id like ?', o['note']['sid'] + ':%')}
     return o
 
 

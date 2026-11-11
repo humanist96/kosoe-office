@@ -18,7 +18,7 @@ async function showYaml(path) {
 }
 
 // ───────────── 스킬 (저장소) ─────────────
-const SCOPE_K = {me: '개인', team: '팀', dept: '부서'};
+const SCOPE_K = {me: '개인', team: '팀', dept: '부서', corp: '전사'};
 async function vSkills(sync) {
   const d = await (sync ? busy('스킬 저장소를 당겨 오는 중…', () => api('/api/skills?sync=1')) : api('/api/skills'));
   const r = d.repo;
@@ -57,6 +57,7 @@ async function openSkill(id) {
    </div><div>
      <h4>버전 · 복구</h4>${s.tags.map((t, i) => `<div class="row sp ev"><span class="chip n">${esc(t)}</span>${i && s.can_change ? `<button class="btn sm ghost" onclick="revertSkill('${esc(s.id)}','${esc(t)}')">이 버전으로 복구 요청</button>` : i ? '' : '<span class="small muted">현재</span>'}</div>`).join('') || '<p class="small muted">태그 없음</p>'}
      <h4 style="margin-top:10px">최근 변경</h4>${s.history.slice(0, 6).map(c => `<div class="ev"><span class="t"><code>${esc(c.sha)}</code></span><span class="grow small">${esc(c.msg)}<br><span class="muted">${esc(c.t)} · ${esc(c.who)}</span></span></div>`).join('')}
+     ${promoteHtml(s)}
      ${s.can_change ? `<h4 style="margin-top:12px">이 팩 고치기 <span class="small muted">→ v${esc(bumpMinor(s.version))} 변경 요청(PR) → 승인 후 다음 문서부터</span></h4>
        <div id="skEd">${s.blocks.map((b, i) => `<div class="row" style="margin-bottom:6px"><input class="in" style="width:110px" value="${esc(b.heading || '')}" data-k="h" data-i="${i}"><textarea class="in" rows="2" data-k="t" data-i="${i}">${esc(b.text)}</textarea></div>`).join('')}</div>
        <label class="small">이 팩의 작성 규칙(한 줄에 하나)</label><textarea class="in" id="skRules" rows="3">${esc(s.own_rules.join('\n'))}</textarea>
@@ -65,6 +66,19 @@ async function openSkill(id) {
    </div></div>`, true);
 }
 const bumpMinor = v => { const p = String(v).split('.').map(Number); return `${p[0]}.${p[1] + 1}.0`; };
+// 부서 · 전사 팩으로 검수 요청: 스킬 폴더를 새 범위 자리로 옮기는 PR → 승인 단계(부서 관리자 → 전사 관리자) → 병합 · 태그
+function promoteHtml(s) {
+  if (!s.promote || !s.promote.length) return '';
+  return `<h4 style="margin-top:12px">📤 부서 · 전사 팩으로 검수 요청 <span class="small muted">→ v${esc(bumpMinor(s.version))} · 폴더를 옮기는 PR, 승인되면 그 범위 전원의 양식 카드</span></h4>
+    ${s.pending ? '<p class="small muted">이 스킬에 처리 중인 요청이 있습니다. 끝난 뒤 낼 수 있습니다.</p>' : `
+    ${s.promote.map(p => `<div class="out-f small row sp"><span><b>${esc(p.name)}</b> — ${p.stages.map(esc).join(' → ')}${p.why ? `<br><span style="color:var(--bad)">${esc(p.why)}</span>` : ''}</span>
+      ${p.why ? '' : `<button class="btn sm o" onclick="promoteSkill('${esc(s.id)}','${p.target}')">검수 요청</button>`}</div>`).join('')}
+    <input class="in" id="skPromote" placeholder="요청 메모 (예: 본부 표준으로 쓰고 싶습니다 — PR에 남습니다)" style="margin-top:6px">`}`;
+}
+async function promoteSkill(id, target) {
+  const d = await busy('스킬 폴더를 새 범위 자리로 옮기는 PR을 여는 중…', () => api(`/api/skills/${id}/promote`, {body: {target, note: $('#skPromote')?.value || ''}}));
+  closeModal(); toast(`검수 요청 — ${d.request.stage_name} 대기` + (d.request.pr_url ? ` · PR #${d.request.pr_number}` : '')); await refreshMe(); go('approve');
+}
 async function showFile(p) { const d = await api('/api/skills-file?path=' + encodeURIComponent(p)); modal(`<code>${esc(p)}</code>`, `<pre class="code">${esc(d.text)}</pre>`, true); }
 async function changeSkill(id) {
   const blocks = SK.blocks.map((b, i) => ({id: b.id, heading: $(`#skEd [data-k=h][data-i="${i}"]`).value, text: $(`#skEd [data-k=t][data-i="${i}"]`).value}));
@@ -182,6 +196,8 @@ function sbDraftHtml() {
    <label class="small">고정 문구 (글자 그대로 들어감)</label><div class="lst-ed">${D.blocks.map((b, i) => `<div class="li"><input class="in" style="max-width:110px" value="${esc(b.heading)}" placeholder="장" oninput="SB.draft.blocks[${i}].heading=this.value;sbYaml()"><textarea class="in" rows="${Math.min(4, 1 + Math.floor(b.text.length / 70))}" oninput="SB.draft.blocks[${i}].text=this.value;sbYaml()">${esc(b.text)}</textarea><button class="x" onclick="SB.draft.blocks.splice(${i},1);SB.draft.forms[0].blocks=SB.draft.blocks.map(x=>x.id);sbDraftHtml()">✕</button></div>`).join('')}
      <button class="btn ghost sm" onclick="const n='b'+(SB.draft.blocks.length+1);SB.draft.blocks.push({id:n,heading:'',text:''});SB.draft.forms[0].blocks.push(n);sbDraftHtml()">+ 추가</button></div>
    <label class="small">작성 규칙</label>${lst(D.rules, 'SB.draft.rules', '예) 결론을 먼저 쓴다')}
+   ${(SB.analysis?.dropped_rules || []).length ? `<details class="small muted" style="margin:4px 0 8px"><summary>서식 · 검사가 맡아 규칙에서 뺀 것 ${SB.analysis.dropped_rules.length}개</summary>
+     ${SB.analysis.dropped_rules.map(x => `<div>· ${esc(x.rule)} <span class="chip">${esc(x.why)}</span></div>`).join('')}</details>` : ''}
    <label class="small">금지어 (쉼표로)</label><input class="in" value="${esc((D.checks.banned || []).join(', '))}" oninput="SB.draft.checks.banned=this.value.split(',').map(x=>x.trim()).filter(Boolean);sbYaml()">
    <details><summary class="small">📁 만들어질 스킬 폴더 미리보기</summary><div class="small muted" style="margin:6px 0"><code>${D.scope === 'user' ? `skills/user/${esc(D.owner)}/${esc(D.id)}/` : `skills/org/${esc(D.org)}/${esc(D.id)}/`}</code> — kosoe-skill.yaml · SKILL.md · evals/case-N/(prompt.md · case.yaml)</div><pre class="code" id="sbY"></pre></details>
    </div>`;
@@ -287,9 +303,11 @@ function pipe(r) {
 function reqCard(r) {
   return `<div class="card box" style="margin-bottom:10px"><div class="row sp wrap"><div><span class="chip dark">${esc(r.kind_name)}</span> <b style="font-size:15px">${esc(r.name)}</b> <span class="chip n">v${esc(r.note.version || '')}</span> <span class="chip o">${SCOPE[r.scope]}</span> <span class="small muted">${esc(r.requester_name)} · ${esc(r.created)}</span></div>
     <div class="row">${r.pr_url ? `<a class="btn ghost sm" href="${esc(r.pr_url)}" target="_blank">GitHub PR #${r.pr_number} ↗</a>` : `<span class="chip">🌿 ${esc(r.branch)}</span>`}</div></div>
-    ${pipe(r)}${forcedBox(r.note.report && r.note.report.forced ? {status: 'forced', ...r.note.report.forced} : null)}<div class="small muted">양식: ${r.outline.map(esc).join(' · ') || '-'} · 경로 <code>${esc(r.path)}/</code></div>
+    ${pipe(r)}${forcedBox(r.note.report && r.note.report.forced ? {status: 'forced', ...r.note.report.forced} : r.note.verification)}<div class="small muted">양식: ${r.outline.map(esc).join(' · ') || '-'} · 경로 <code>${esc(r.path)}/</code></div>
+    ${r.note.kind === 'promote' ? `<div class="row wrap" style="margin-top:6px"><button class="btn ghost sm" onclick="openSkill('${esc(r.note.sid)}')">📄 스킬 내용 보기</button>
+      ${Object.entries(r.samples || {}).map(([tid, fs]) => fs.length ? `<button class="btn ghost sm" onclick='openZoom(${esc(JSON.stringify(fs.map(f => `/api/samples/${encodeURIComponent(tid)}/${encodeURIComponent(f)}`)))}, 0)'>🖼 샘플 ${fs.length}장</button>` : '<span class="small muted">샘플 그림 없음</span>').join('')}</div>` : ''}
     <div style="margin-top:8px">${r.history.map(h => `<div class="ev"><span class="t">${esc(h.t)}</span><span class="grow"><b>${esc(h.who)}</b> ${esc(h.act)}${h.note ? ` — “${esc(h.note)}”` : ''}</span></div>`).join('')}</div>
-    ${r.can_decide ? `<div class="row" style="margin-top:10px"><input class="in" id="n-${r.id}" placeholder="의견 (PR 댓글로 남습니다)"><button class="btn" onclick="decide('${r.id}',true)">승인 → 병합·태그</button><button class="btn red" onclick="decide('${r.id}',false)">반려</button></div>` : ''}</div>`;
+    ${r.can_decide ? `<div class="row" style="margin-top:10px"><input class="in" id="n-${r.id}" placeholder="의견 (PR 댓글로 남습니다)"><button class="btn" onclick="decide('${r.id}',true)">${r.stages.indexOf(r.stage) < r.stages.length - 1 ? '승인 → 다음 단계' : '승인 → 병합·태그'}</button><button class="btn red" onclick="decide('${r.id}',false)">반려</button></div>` : ''}</div>`;
 }
 async function decide(id, approve) {
   const note = $('#n-' + id)?.value || '';
